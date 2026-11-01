@@ -1,6 +1,6 @@
 # MECHEN M30 custom firmware: shuffle fix, shuffle all songs, and fast scrolling
 
-Unofficial firmware patches for the **MECHEN M30 HiFi MP3 player**. They fix the broken shuffle on large music libraries, add a shuffle-all-songs mode to the folder view, and add scroll-wheel acceleration so you can move through thousands of folders quickly. The patches apply to the official MECHEN M30 firmware release dated 2025-06-26 (`MECHEN_M30.HEX`) and install through the player's normal firmware update.
+Unofficial firmware patches for the **MECHEN M30 HiFi MP3 player**. They fix the broken shuffle on large music libraries, add a shuffle-all-songs mode to the folder view, and add scroll-wheel acceleration so you can move through thousands of folders quickly. The patches apply to the official MECHEN M30 firmware release dated 2025-06-26 (`MECHEN_M30.HEX`) and install through the player's normal firmware update. You can apply a patch from a [release](#download-a-patched-release) or [build the firmware](#build-the-firmware) yourself.
 
 The MECHEN M30 is built on an Actions Semiconductor ATJ2127-family chip (USB ID `10d6:1101`). This repository also includes tools to decrypt, unpack, modify, and repack Actions ATJ2127 FWU firmware files, which can help with reverse engineering similar Actions-based MP3 players.
 
@@ -32,6 +32,23 @@ These issues are still present in the patched firmware:
 - The first song you play in shuffle-all mode starts after a short delay while the player walks the card's folder tree.
 - With the screen off or dimmed, the prev, next, and volume buttons do nothing until you press the power button. This is stock behavior.
 - The **All songs** library view still stops at 4,000 tracks. The library builder in the stock firmware sets that limit. The folder view and shuffle-all mode aren't limited.
+
+## Download a patched release
+
+Each release on the [releases page](https://github.com/averagenative/mechen-m30-firmware/releases) has a small BPS patch file instead of the patched firmware, because the firmware itself belongs to MECHEN. You apply the patch to the stock `MECHEN_M30.HEX` to get the patched one. A BPS patch carries CRC-32 checksums of the stock file and the result, so patch tools refuse to apply it to the wrong file.
+
+To make the patched firmware from a release:
+
+1. Download the stock 2025-06-26 `MECHEN_M30.HEX` from MECHEN's Google Drive folder, as described in [Supported players and firmware](#supported-players-and-firmware).
+1. Download the `.bps` file from the release.
+1. Apply the patch with one of these tools:
+   - In a web browser, open [Rom Patcher JS](https://www.marcrobledo.com/RomPatcher.js/). Select the stock `MECHEN_M30.HEX` as the ROM file and the `.bps` file as the patch, and then click **Apply patch**.
+   - On Windows or Linux, use [Floating IPS](https://github.com/Alcaro/Flips).
+   - With Python 3, run `python3 tools/bps.py apply MECHEN_M30.HEX MECHEN_M30-v3.bps MECHEN_M30-patched.HEX`.
+1. If the tool gave the patched file another name, rename it to `MECHEN_M30.HEX`.
+1. Optional: Check that the patched file's SHA-256 matches the one in the release notes.
+
+Then [install the firmware](#install-the-firmware-on-the-mechen-m30).
 
 ## Build the firmware
 
@@ -84,7 +101,7 @@ The patched firmware installs the same way as an official MECHEN M30 firmware up
 
 1. Connect the player to your computer over USB.
 1. If the card already has a `MECHEN_M30.HEX` or `MECHEN_M30~.HEX` in its root folder, delete it. The player only updates when exactly one firmware file is present.
-1. Copy `build/MECHEN_M30.HEX` to the root folder of the card.
+1. Copy the patched `MECHEN_M30.HEX`, from a release or from `build/`, to the root folder of the card.
 1. Eject the player and unplug it.
 
 The player installs the update, renames the file to `MECHEN_M30~.HEX`, and then shows "filelist update" while it rebuilds its file list. On a large card, the file list rebuild takes several minutes.
@@ -139,6 +156,7 @@ The repository contains these files and folders:
 | `tools/playall/` | Shuffle-all mode: folder walker (A), folder permutation (B), and next-track hook (C), plus the harness. |
 | `tools/scroll/` | Scroll acceleration (`accel.c`, `tramp.S`), the app patcher, and the harness. |
 | `tools/patch_mengine.py` | Applies the shuffle fix and shuffle-all code to `mengine.ap`. |
+| `tools/bps.py` | Creates and applies the BPS patches that releases use. |
 | `tools/repack_fw.py`, `tools/fwu_repack.py` | Rebuild the FWU, AFI, and FWIMAGE.FW layers with new checksums and encryption. |
 | `tools/refscan.py` | Lists every stock function inside a patched range and every call or pointer to it. Run it on any new patch so you don't overwrite live code. |
 | `tools/apinfo.py`, `tools/hiddenbanks.py`, `tools/findbase.py` | Read `.ap` headers and bank tables, and find the load addresses of banks that aren't in the table. |
