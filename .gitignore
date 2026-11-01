@@ -1,0 +1,25 @@
+# Allowlist: ignore everything, then re-include the files that belong in the repo.
+# Vendor firmware (.HEX, .fw, zips), patched builds, saved web pages, and card listings stay out.
+/*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/build.sh
+!/tools/
+
+/tools/**/__pycache__/
+/tools/*.pyc
+# Card-maintenance scripts for one specific library, not firmware tools
+/tools/albumdupes.py
+/tools/card_cleanup.py
+
+# Never commit firmware images or build output, wherever they end up
+*.HEX
+*.hex
+*.fw
+*.FW
+*.ap
+*.bin
+*.elf
+*.o
+/build/
