@@ -192,6 +192,7 @@ The repository contains these files and folders:
 | `tools/playall/` | Shuffle-all mode: folder walker (A), folder permutation (B), next-track hook (C), step back and song choice (D), and prev-track hook (E), plus the harness. |
 | `tools/scroll/` | Scroll acceleration (`accel.c`, `tramp.S`), the app patcher, and the harness. |
 | `tools/keys/` | Screen-off buttons (`keypass.S`), the app patcher, and the harness. |
+| `tools/library/` | Library builder work in progress: a QEMU harness that runs the stock MUSIC.LIB index passes (`harness.c`, `testbanks.py`, `test.sh`) and `libdiff.py` to compare two libraries. See `docs/library-builder.md`. |
 | `tools/patch_mengine.py` | Applies the shuffle fix and shuffle-all code to `mengine.ap`. |
 | `tools/bps.py` | Creates and applies the BPS patches that releases use. |
 | `tools/repack_fw.py`, `tools/fwu_repack.py` | Rebuild the FWU, AFI, and FWIMAGE.FW layers with new checksums and encryption. |
@@ -212,7 +213,7 @@ These notes describe the parts of the firmware that the patches depend on. All a
 
 ### App overlays and banks
 
-An `.ap` file has a header with the resident code (file offset `0xc00`, loaded at `0xbfc16400`), a data segment, an entry point, and a bank table at `0x100` of `{file offset, load address, size}` entries. Code is MIPS16e. Banks load on demand: a call into a bank that isn't loaded raises an exception, and the kernel loads the bank and retries the call. The table holds 12-byte entries in blocks of 64 per bank group, and the kernel loads exactly the listed size of a bank. The music engine's group `0x7b` sits at `0x700`, past the part of the table that most tools read. It has bank 1 at file `0x7300` (loaded at `0x7b068000`), bank 2 at file `0x7b00` (loaded at `0x7b0a8000`), and bank 6 at file `0x8d00` (loaded at `0x7b1a8000`).
+An `.ap` file has a header with the resident code, a data segment, an entry point, and a bank table at `0x100` of `{file offset, load address, size}` entries. The resident segment is described by `{file offset, size, load address}` at header offset `0x08`; in most apps that is file offset `0xc00` loaded at `0xbfc16400`, but `playlist.ap` has two resident segments (the triple at `0x14` puts file `0xc00` at `0xbfc11d00`, and the main one is at file `0x1400`). Code is MIPS16e. Banks load on demand: a call into a bank that isn't loaded raises an exception, and the kernel loads the bank and retries the call. The table holds 12-byte entries in blocks of 64 per bank group (five groups, `0x100` to `0x1000`; the length word at `0x2c` understates it), and the kernel loads exactly the listed size of a bank. The music engine's group `0x7b` sits at `0x700`, and the shared-library group `0x71` at `0xa00`, past the part of the table that `apinfo.py` reads. It has bank 1 at file `0x7300` (loaded at `0x7b068000`), bank 2 at file `0x7b00` (loaded at `0x7b0a8000`), and bank 6 at file `0x8d00` (loaded at `0x7b1a8000`).
 
 System calls are stubs at the end of the resident code, `li v1,MODULE; break`, with the function ID as the last argument. The patches use module `0x0f` (kernel: function `0x1c` is the millisecond clock, `0x35` is the random number generator) and module `0x11` (file system).
 

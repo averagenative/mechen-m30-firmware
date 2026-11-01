@@ -1,5 +1,5 @@
 // Map an Actions ATJ2127 .ap overlay file into the current program:
-// one block per bank-table entry, MIPS16e ISA mode, functions at SAVE prologues.
+// one block per bank-table entry and per resident segment, MIPS16e ISA mode, functions at SAVE prologues.
 // Optional second argument "fileoff:addr,..." maps banks missing from the table
 // (each sized up to the next listed offset, max 0x800).
 import ghidra.app.script.GhidraScript;
@@ -28,8 +28,8 @@ public class LoadAP extends GhidraScript {
         sp = currentProgram.getAddressFactory().getDefaultAddressSpace();
         isa = currentProgram.getRegister("ISA_MODE");
         int nfunc = 0;
-        int tableLen = bb.getInt(0x2c);
-        for (int off = 0x100; off + 12 <= 0x100 + tableLen; off += 12) {
+        // The header word at 0x2c understates the table: it has five groups of 64 entries.
+        for (int off = 0x100; off + 12 <= 0x1000; off += 12) {
             long fo = bb.getInt(off) & 0xffffffffL;
             long a = bb.getInt(off + 4) & 0xffffffffL;
             long s = bb.getInt(off + 8) & 0xffffffffL;
@@ -45,6 +45,13 @@ public class LoadAP extends GhidraScript {
                 int end = k + 1 < specs.length ? Integer.decode(specs[k + 1].split(":")[0]) : fo + 0x800;
                 nfunc += mapBank(fo, Long.decode(fa[1]), Math.min(0x800, end - fo));
             }
+        }
+        // Resident segments: {file offset, size, load address} at 0x08 and, in playlist.ap, 0x14.
+        for (int h = 0x08; h <= 0x14; h += 0x0c) {
+            int rfo = bb.getInt(h), rsz = bb.getInt(h + 4);
+            long raddr = bb.getInt(h + 8) & 0xffffffffL;
+            if (rfo != 0 && rsz > 0 && raddr != 0 && rfo + rsz <= d.length)
+                nfunc += mapBank(rfo, raddr, rsz);
         }
         Address ea = sp.getAddress((bb.getInt(0x40) & 0xffffffffL) & ~1L);
         addEntryPoint(ea);

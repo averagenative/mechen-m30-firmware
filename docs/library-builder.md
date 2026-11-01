@@ -241,11 +241,26 @@ songs.
 
 ### Text conversion for keys
 
-`FUN_480145dc` (bank `0x48014400`, file `0x75dc`) normalizes a field: UTF-16 with BOM goes
-through module 6 function `0x1a` (UTF-16 to multibyte), UTF-8 with BOM goes through `0x1d` then
-`0x1a`, and plain ASCII is copied as is. `FUN_48014694` then copies the first `keylen` bytes of
-the result from `0x9fc15538` into the key slot. Keys are therefore one byte per character for
-ASCII text, and the compare upper-cases them.
+`FUN_480145dc` (bank `0x48014400`, file `0x75dc`) normalizes a field: UTF-16 with BOM is copied
+(twice the field width in bytes, so the copy runs past the field into stale read-buffer bytes)
+to `0x9fc15538` and converted in place by module 6 function `0x1a` (UTF-16 to multibyte), UTF-8
+with BOM goes through `0x1d` then `0x1a`, and plain ASCII is copied as is. `FUN_48014694` then
+copies the first `keylen` bytes of the result into the key slot. Keys are therefore one byte per
+character for ASCII text, and the compare upper-cases them.
+
+The conversion isn't decompiled (it lives in the kernel), but the sort order of a player-built
+library pins most of it down. Characters up to U+00FF become their byte value, so "Déjà vu" sorts
+after "Dross Glop" and "02 Qué Onda" after "02 Queen". The first character above U+00FF stops the
+conversion without writing anything, so the rest of the buffer keeps the UTF-16 input bytes: that
+is why "“Awaken, My Love!”" (U+201C, bytes `1c 20`) and "…And You Will Know Us" (U+2026, bytes
+`26 20`) are the first two albums, before "13". Three cases don't fit any per-string rule tried
+(the all-Greek album "Ἀποκάλυψις" sorts third instead of first, "We’ve Come for You All" sorts
+before "We Got It From Here", and "D’Angelo" and "DāM‐FunK" are separate artists), so the
+player's handling right after such a character has state this sample doesn't reveal. It affects
+only names with characters above U+00FF.
+
+The record field for a 23-character UTF-16 name has no terminating zero, and the tag reader seems
+to limit names to 22 characters plus the terminator.
 
 ### Node writer: FUN_40294f20 (bank 0x40294c00, file 0x6f20)
 
@@ -343,14 +358,30 @@ the folder views.
 
 ## Test plan
 
-1. A QEMU user-mode harness, like `tools/playall/harness.c`, that loads the stock banks
-   `0x400d4c00`, `0x40114c00`, `0x40294c00`, `0x71812500`, `0x48014400`, and `0x40194c00` at
-   their real addresses, moves every RAM and resident pointer in their literal pools to harness
-   memory, and implements the file system ops, the text conversions, the append write, and the
-   message pump in C. Running the stock passes on the records from
-   `notes/MUSIC.LIB.stock-4000` must reproduce that file's tables. This proves the harness and the
-   reading of the stock code.
-2. The same harness runs the new passes on the same records and diffs the output against stock.
+1. Done: `tools/library/harness.c` is a QEMU user-mode harness that loads the stock banks
+   `0x400d4c00`, `0x40114c00`, `0x40194c00`, `0x40294c00`, `0x48014400`, and `0x71812500` at
+   their real addresses, with every RAM and resident pointer in their literal pools moved by
+   `tools/library/testbanks.py` to harness memory (the scan of 4-byte aligned words for pointer
+   values matches the decompile's literal-pool list exactly for all six banks), and implements
+   the file system ops, the text conversions, the append write, and the message pump in C. The
+   harness sets up the app state as the scan leaves it, generates the title keys with the stock
+   key routine, calls `FUN_400d5290` and the header finalize `FUN_4019502c`, and compares the
+   result with the player-built file. `tools/library/test.sh STOCK_PLAYLIST.AP MUSIC.LIB` builds
+   and runs it, then `tools/library/libdiff.py` compares the two files section by section.
+
+   Against `notes/MUSIC.LIB.stock-4000` the All songs and Genre sections come out byte for byte
+   identical, including the tie refinement, and the Album and Artist sections match except for
+   the names with characters above U+00FF described under text conversion (one merged artist
+   pair, and three album groups placed differently). The stock passes take about three minutes
+   under QEMU at 4,000 songs.
+
+   Two harness details matter for anyone extending it: the key extractor calls the text
+   converter with destination 0, so the stock code copies each converted field to address 0 (a
+   quirk that is harmless on the player, ignored in the harness), and the file position is
+   shared between reads and appends, which the stock code handles by seeking back to the
+   append sector after each extraction.
+2. The same harness runs the new passes on the same records and diffs the output against stock,
+   on ASCII-only names where the stock order is reproduced exactly.
 3. A synthetic 18,000-song input built from the card index checks the new passes at scale
    against a Python reference model, and `tools/musiclib.py` decodes the result.
 4. On the player: raise the cap, flash, and check All songs, Artists, Albums, Genres, favourites
