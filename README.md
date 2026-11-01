@@ -103,8 +103,12 @@ The patched firmware installs the same way as an official MECHEN M30 firmware up
 1. If the card already has a `MECHEN_M30.HEX` or `MECHEN_M30~.HEX` in its root folder, delete it. The player only updates when exactly one firmware file is present.
 1. Copy the patched `MECHEN_M30.HEX`, from a release or from `build/`, to the root folder of the card.
 1. Eject the player and unplug it.
+1. Wait for the player to finish "filelist update". On a large card, it takes several minutes.
+1. In the main menu, go to **Setting** > **Auto upgrade**.
+1. When the player shows "Select to upgrade with[MECHEN_M30.HEX]", confirm it.
+1. Leave the player on while it shows "Please do not power off during firmware upgrade", until it shows "firmware upgrade succeed".
 
-The player installs the update, renames the file to `MECHEN_M30~.HEX`, and then shows "filelist update" while it rebuilds its file list. On a large card, the file list rebuild takes several minutes.
+After the upgrade, the player renames the file to `MECHEN_M30~.HEX`, so it doesn't install it again.
 
 ### Turn on shuffle all songs
 
