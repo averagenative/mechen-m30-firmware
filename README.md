@@ -24,7 +24,7 @@ The patches work only with this combination:
 
 Other firmware versions don't work, because the patches use fixed code addresses. The build checks the stock bytes at every patch site and stops if they don't match. The "Version 2.0" release (`SDM30008.img`) is for a different board with a Rockchip RKnano chip, and these patches don't apply to it.
 
-The shuffle fix, shuffle-all mode, and scroll acceleration run on a MECHEN M30 with a 256 GB exFAT card that holds about 18,000 tracks. The screen-off buttons patch passes its QEMU tests and hasn't been confirmed on the player yet. To build without it, use `--no-keys`.
+The shuffle fix, shuffle-all mode, scroll acceleration, and screen-off buttons run on a MECHEN M30 with a 256 GB exFAT card that holds about 18,000 tracks.
 
 ## Known limitations
 
@@ -119,7 +119,7 @@ The script takes these options:
 - `--no-playall`: leaves out shuffle-all mode.
 - `--no-keys`: leaves out the screen-off buttons patch.
 
-With the tested toolchain, a build with `--no-keys` is byte-identical to the build that runs on the test player, SHA-256 `c8c522792bf2a70a5be9b3603b7bab010e150a810b5e4f21a175afb0a6f05af9`. A different compiler version can produce a different but valid file.
+With the tested toolchain, the full build is byte-identical to the v4 release, SHA-256 `8e7a7ac0f47523a363406e484f1acb881f377921b6f3d3f48e53aa578b7bb6d9`, and a build with `--no-keys` is byte-identical to v3, SHA-256 `c8c522792bf2a70a5be9b3603b7bab010e150a810b5e4f21a175afb0a6f05af9`. Both run on the test player. A different compiler version can produce a different but valid file.
 
 ## Install the firmware on the MECHEN M30
 
