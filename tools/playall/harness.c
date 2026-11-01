@@ -1,10 +1,13 @@
-/* QEMU harness (MIPS32 o32, freestanding) for the whole-card shuffle units A (0x7b068484)
- * and B (0x7b1a82ac), with a mock file system and mock stock engine routines. */
+/* QEMU harness (MIPS32 o32, freestanding) for the whole-card shuffle units A (0x7b068484),
+ * B (0x7b1a82ac), C (0x7b1a84b4), D (0x7b1a8754), and E (0x7b0a8458), with a mock file system
+ * and mock stock engine routines. */
 typedef unsigned int u32;
 typedef unsigned short u16;
 typedef unsigned char u8;
 
 extern u32 playall_next(u32 *out);
+extern u32 playall_prev(u32 *out);
+extern void folder_reseed(u16 n);
 
 #define RAMB 0x10000000u
 #define R8(o)  (*(volatile u8 *)(RAMB + (o)))
@@ -66,7 +69,7 @@ static void dfs(int n)
 }
 
 /* ---- mock stock routines at fixed addresses ---- */
-static u32 vfs_calls, seeks, fallbacks, errors, last_seek_dir, last_seek_no, rand_calls;
+static u32 vfs_calls, seeks, fallbacks, prev_fallbacks, errors, last_seek_dir, last_seek_no, rand_calls;
 
 __attribute__((section(".stub_rand"), used, noinline))
 u32 stub_rand(u32 a, u32 b, u32 c, u32 fn)
@@ -138,6 +141,14 @@ u32 stub_next_cross(u32 *out)
     return 1;
 }
 
+__attribute__((section(".stub_prevx"), used, noinline))
+u32 stub_prev_cross(u32 *out)
+{
+    prev_fallbacks++;
+    if (out) *out = 0xbac1;
+    return 1;
+}
+
 /* ---- output ---- */
 static long sys3(long n, long a, long b, long c)
 {
@@ -150,10 +161,14 @@ static void puts_(const char *s) { while (*s) obuf[olen++] = *s++; }
 static void putu(u32 v) { char t[12]; int i = 0; do t[i++] = '0' + v % 10; while (v /= 10); while (i) obuf[olen++] = t[--i]; }
 
 static u8 seen[MAXN];
+#define H 60
+static u32 hist_dir[H], hist_no[H];
 
 void _start(void)
 {
     u32 (*volatile next)(u32 *) = (u32 (*)(u32 *))((u32)playall_next | 1);
+    u32 (*volatile prev)(u32 *) = (u32 (*)(u32 *))((u32)playall_prev | 1);
+    void (*volatile reseed)(u16) = (void (*)(u16))((u32)folder_reseed | 1);
     u32 fails = 0, out, i, cyc, k;
 
     build(0);
@@ -184,11 +199,57 @@ void _start(void)
     R8(0x23) = 0; k = fallbacks; i = seeks;
     next(&out);
     if (fallbacks != k + 1 || seeks != i || out != 0xfa11) { fails++; puts_("shuffle-off FAIL\n"); } else puts_("shuffle off -> stock next ok\n");
+    k = prev_fallbacks; i = seeks;
+    prev(&out);
+    if (prev_fallbacks != k + 1 || seeks != i || out != 0xbac1) { fails++; puts_("shuffle-off prev FAIL\n"); } else puts_("shuffle off -> stock prev ok\n");
     R8(0x23) = 1;
+
+    /* P: prev walks the played order back song for song, then next replays it */
+    { u32 bad = 0, pf0, s0, fb0 = fallbacks;
+      reseed(0);                                    /* start a fresh cycle on the next call */
+      for (k = 0; k < H; k++) {
+          if (next(&out) != 1) bad++;
+          hist_dir[k] = last_seek_dir; hist_no[k] = last_seek_no;
+      }
+      for (k = H - 1; k-- > 0; ) {                  /* H - 2 .. 0 */
+          s0 = seeks;
+          if (prev(&out) != 1 || seeks != s0 + 1) bad++;
+          if (last_seek_dir != hist_dir[k] || last_seek_no != hist_no[k]) bad++;
+          if (R8(0x22) != (u8)depth[last_seek_dir] || out != last_seek_dir * 1000 + last_seek_no) bad++;
+      }
+      puts_("prev x"); putu(H - 1); puts_(bad ? ": FAIL\n" : ": retraced every folder and song in reverse ok\n");
+      if (bad) fails++;
+      bad = 0; pf0 = prev_fallbacks; s0 = seeks;
+      prev(&out);                                   /* first song of the cycle: nothing before it */
+      if (prev_fallbacks != pf0 + 1 || seeks != s0 || out != 0xbac1) bad++;
+      for (k = 1; k < H; k++) {
+          next(&out);
+          if (last_seek_dir != hist_dir[k] || last_seek_no != hist_no[k]) bad++;
+      }
+      puts_("prev at cycle start -> stock prev, then next x"); putu(H - 1);
+      puts_(bad ? ": FAIL\n" : ": replayed the same order ok\n");
+      if (bad) fails++;
+      bad = 0;
+      for (k = 0; k < 5; k++) {                     /* prev, next pairs stay on the same two songs */
+          prev(&out); if (last_seek_dir != hist_dir[H - 2] || last_seek_no != hist_no[H - 2]) bad++;
+          next(&out); if (last_seek_dir != hist_dir[H - 1] || last_seek_no != hist_no[H - 1]) bad++;
+      }
+      pf0 = prev_fallbacks; s0 = seeks;
+      reseed(37);                                   /* fresh cycle, position 0: prev must not loop */
+      prev(&out);
+      if (prev_fallbacks != pf0 + 1 || seeks != s0) bad++;
+      reseed(0);
+      pf0 = prev_fallbacks; prev(&out);             /* no cycle state at all */
+      if (prev_fallbacks != pf0 + 1) bad++;
+      puts_("prev/next pairs, prev on a fresh or empty cycle"); puts_(bad ? ": FAIL\n" : ": ok\n");
+      if (bad) fails++;
+      if (fallbacks != fb0) { fails++; puts_("unexpected next fallbacks\n"); } }
 
     /* 3: card changes mid-cycle (fewer song folders): must recover and cover the new set */
     for (k = 0; k < 10; k++) next(&out);
     build(1); norder = 0; dfs(0);
+    { u32 s0 = seeks; prev(&out);                    /* prev right after the change */
+      if (seeks != s0 && nfiles[last_seek_dir] == 0) { fails++; puts_("prev after card change FAIL\n"); } }
     { u32 bad = 0, fb0 = fallbacks, calls = 0;
       for (i = 0; i < MAXN; i++) seen[i] = 0;
       for (k = 0; k < 4u * norder && calls < 4000; k++) {

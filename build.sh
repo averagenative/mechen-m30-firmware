@@ -66,7 +66,17 @@ if [ $PLAYALL = 1 ]; then
   blob playall_a "$T/playall/playall_a.c" 0x7b068484
   blob playall_b "$T/playall/playall_b.c" 0x7b1a82ac
   blob playall_c "$T/playall/playall_c.c" 0x7b1a84b4
-  PA=(playall_a.bin playall_b.bin playall_c.bin)
+  blob playall_d "$T/playall/playall_d.c" 0x7b1a8754
+  blob playall_e "$T/playall/playall_e.c" 0x7b0a8458
+  # the units call each other at the fixed addresses in playall.h: check them against the links
+  for c in "a walk WALK" "b mix FOLDER_MIX" "b folder_reseed FOLDER_RESEED" "b folder_next FOLDER_NEXT" \
+           "d folder_prev FOLDER_PREV" "d folder_song FOLDER_SONG"; do
+    set -- $c
+    want=$(awk -v n="$3" '$1 == "#define" && $2 == n { sub(/u$/, "", $3); print $3; exit }' "$T/playall/playall.h")
+    got=$(sym playall_$1.elf $2)
+    [ $((0x$got + 1)) = $((want)) ] || { echo "playall.h has $3 $want but $2 links at 0x$got"; exit 1; }
+  done
+  PA=(playall_a.bin playall_b.bin playall_c.bin playall_d.bin playall_e.bin)
 fi
 "$PY" -I "$T/patch_mengine.py" "$F/mengine.ap" mengine.ap shuffle.bin "${PA[@]}" | sed 's/^/   /'
 
@@ -119,7 +129,7 @@ for f in $PATCHED; do cmp -s $f "$W/verify/fw/$f" || { echo "   extracted $f dif
 changed=$(for f in "$F"/*; do b=$(basename "$f"); cmp -s "$f" "$W/verify/fw/$b" || printf '%s ' "$b"; done)
 echo "   files changed from stock: $changed"
 [ "$changed" = "$(printf '%s\n' $PATCHED | sort | tr '\n' ' ')" ] || { echo "   unexpected set of changed files"; exit 1; }
-"$PY" -I "$T/refscan.py" mengine.ap 0x7300:0x7b068000:0x800 0x8d00:0x7b1a8000:0x800 > refscan.txt
+"$PY" -I "$T/refscan.py" mengine.ap 0x7300:0x7b068000:0x800 0x7b00:0x7b0a8000:0x500 0x8d00:0x7b1a8000:0x800 > refscan.txt
 
 if [ $TEST = 1 ]; then
   echo "== QEMU tests"
@@ -133,14 +143,15 @@ if [ $TEST = 1 ]; then
   if [ $PLAYALL = 1 ]; then
     TD="-DTEST -DTEST_RAM=0x10000000u -DTEST_RAND=0x00500000u -DTEST_VFS=0x00505000u -DTEST_RESET_ROOT=0x00501000u
       -DTEST_COUNT_FILES=0x00502000u -DTEST_SEEK_FILE=0x00503000u -DTEST_NEXT_CROSS=0x00504000u -DTEST_WALK=0x7b068485u
-      -DTEST_FOLDER_RESEED=0x7b1a82d5u -DTEST_FOLDER_NEXT=0x7b1a836du"
+      -DTEST_FOLDER_RESEED=0x7b1a82d5u -DTEST_FOLDER_NEXT=0x7b1a836du -DTEST_FOLDER_MIX=0x7b1a82adu
+      -DTEST_FOLDER_PREV=0x7b1a8755u -DTEST_FOLDER_SONG=0x7b1a878du -DTEST_PREV_CROSS=0x00506000u"
     mkdir -p t_playall; cd t_playall
-    for u in a b c; do
+    for u in a b c d e; do
       "${CROSS}gcc" $CFLAGS $TD -c -o ${u}_test_raw.o "$T/playall/playall_$u.c"
       "${CROSS}objcopy" --set-section-alignment .text=4 ${u}_test_raw.o ${u}_test.o
     done
     "${CROSS}gcc" $HFLAGS -Wno-unused-function -c -o harness.o "$T/playall/harness.c"
-    "${CROSS}ld" -EL -m elf32ltsmip -T "$T/playall/test.ld" -o test.elf harness.o a_test.o b_test.o c_test.o
+    "${CROSS}ld" -EL -m elf32ltsmip -T "$T/playall/test.ld" -o test.elf harness.o a_test.o b_test.o c_test.o d_test.o e_test.o
     cd ..
     timeout 900 "$QEMU" -cpu 24Kc t_playall/test.elf > test_playall.txt || true
     echo "   playall:  $(tail -n 1 test_playall.txt)"

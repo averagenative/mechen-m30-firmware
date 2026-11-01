@@ -1,6 +1,7 @@
 /*
- * Whole-card shuffle: addresses and engine state shared by parts A (walker, mengine bank 1)
- * and C (playall_next, mengine shuffle bank 6).  Part B is the folder permutation.
+ * Whole-card shuffle: addresses and engine state shared by parts A (walker, mengine bank 1),
+ * C (playall_next, mengine shuffle bank 6), D (folder_prev and folder_song, bank 6), and
+ * E (playall_prev, bank 2).  Part B is the folder permutation.
  */
 typedef unsigned int u32;
 typedef unsigned short u16;
@@ -17,6 +18,10 @@ typedef unsigned char u8;
 #define WALK            0x7b068485u     /* part A */
 #define FOLDER_RESEED   0x7b1a82d5u     /* part B */
 #define FOLDER_NEXT     0x7b1a836du     /* part B */
+#define FOLDER_MIX      0x7b1a82adu     /* part B: mix() */
+#define FOLDER_PREV     0x7b1a8755u     /* part D */
+#define FOLDER_SONG     0x7b1a878du     /* part D */
+#define PREV_CROSS      0x7b0a82adu     /* stock: previous song, crossing folders */
 #else
 #define RAM(off)        (TEST_RAM + (off))
 #define VFS_STUB        TEST_VFS
@@ -28,6 +33,10 @@ typedef unsigned char u8;
 #define WALK            TEST_WALK
 #define FOLDER_RESEED   TEST_FOLDER_RESEED
 #define FOLDER_NEXT     TEST_FOLDER_NEXT
+#define FOLDER_MIX      TEST_FOLDER_MIX
+#define FOLDER_PREV     TEST_FOLDER_PREV
+#define FOLDER_SONG     TEST_FOLDER_SONG
+#define PREV_CROSS      TEST_PREV_CROSS
 #endif
 
 #define VFS(m, e, f)    (((u32 (*)(u32, u32, u32, u32, u32))VFS_STUB)(HANDLE, (m), 0, (e), (f)))

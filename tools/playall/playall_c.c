@@ -5,8 +5,9 @@
  * Folder mode, Repeat All: the stock "next" walks to the next file, crossing folders in
  * depth-first order (0x7b0681e8), and with shuffle on only shuffles inside each folder.
  * playall_next() replaces that call in the Repeat All path: with shuffle on it jumps to
- * the next folder of a random folder order (part B) and plays a random song in it, so the
- * whole card is covered; with shuffle off it is exactly the stock call.
+ * the next folder of a random folder order (part B) and plays a random song in it (part D
+ * picks it from the order's key, so prev can return to it), so the whole card is covered;
+ * with shuffle off it is exactly the stock call.
  */
 #include "playall.h"
 
@@ -28,7 +29,7 @@ u32 playall_next(u32 *out)
             COUNT = c;
             POS = 0;
             if (c != 0)
-                return ((u32 (*)(u32 *, u16))SEEK_FILE)(out, (u16)(RAND() % c + 1));
+                return ((u32 (*)(u32 *, u16))SEEK_FILE)(out, ((u16 (*)(u16))FOLDER_SONG)(c));
         }
         ((void (*)(u16))FOLDER_RESEED)(0);  /* card changed? recount next time */
         ((void (*)(void))RESET_ROOT)();

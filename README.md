@@ -11,7 +11,7 @@ The MECHEN M30 is built on an Actions Semiconductor ATJ2127-family chip (USB ID 
 The patches change four things in the stock MECHEN M30 firmware:
 
 - **Shuffle fix.** On a large SD card, stock shuffle plays the same small part of the library, mostly artists that start with A, B, or C. The patch replaces the stock shuffle with one that reaches every track on the card.
-- **Shuffle all songs from folder view.** Stock firmware only shuffles inside the current folder. With **Repeat all** and **Shuffle** on, the patched player shuffles across every folder on the card.
+- **Shuffle all songs from folder view.** Stock firmware only shuffles inside the current folder. With **Repeat all** and **Shuffle** on, the patched player shuffles across every folder on the card, and prev steps back through the songs it already played.
 - **Scroll-wheel acceleration.** Stock firmware moves one item per wheel click. The patched folder view speeds up while you keep turning the wheel: 1, then 5, 20, 50, and 100 items per click. A pause of 0.7 seconds or a change of direction drops back to 1, and fast scrolling stops at the top and bottom of the list instead of wrapping.
 - **Buttons work with the screen off.** With stock firmware, after the backlight timer turns the screen off, the first press of any button only turns the screen back on, and the press is lost. With the patch, the play/pause, prev, next, volume up, and volume down buttons act immediately and the screen stays off. The wheel, OK, and back buttons still turn the screen on, and the power button still turns it on or off.
 
@@ -31,6 +31,7 @@ The shuffle fix, shuffle-all mode, scroll acceleration, and screen-off buttons r
 These issues are still present in the patched firmware:
 
 - The first song you play in shuffle-all mode starts after a short delay while the player walks the card's folder tree.
+- In shuffle-all mode, prev goes back only as far as the first song that shuffle-all chose in the current pass over the card. From there, prev works as in stock firmware and picks another song in the same folder. After the player has played every folder once, it starts a new random order, and prev can't go back past that point.
 - With the screen off, the buttons act on whichever screen was open when it turned off. On the now-playing screen, prev and next change tracks. In the folder view, they move the hidden selection instead, the same as they do with the screen on.
 - The **All songs** library view still stops at 4,000 tracks. The library builder in the stock firmware sets that limit. The folder view and shuffle-all mode aren't limited.
 
@@ -63,10 +64,10 @@ Instead of downloading the patched firmware, you can make it from MECHEN's stock
    curl -L -o MECHEN_M30.HEX 'https://drive.google.com/uc?export=download&id=1lTyyP05toQHbcnmmiK3R9FFToj9RZfxC'
    ```
 
-1. Apply the patch for the version you want. For example, for v4:
+1. Apply the patch for the version you want. For example, for v5:
 
    ```
-   python3 tools/bps.py apply MECHEN_M30.HEX patches/MECHEN_M30-v4.bps build/MECHEN_M30.HEX
+   python3 tools/bps.py apply MECHEN_M30.HEX patches/MECHEN_M30-v5.bps build/MECHEN_M30.HEX
    ```
 
    The command writes `build/MECHEN_M30.HEX` and prints its SHA-256, which matches the one in the release notes. If the stock file isn't the 2025-06-26 release, the command stops with an error and writes nothing.
@@ -119,7 +120,7 @@ The script takes these options:
 - `--no-playall`: leaves out shuffle-all mode.
 - `--no-keys`: leaves out the screen-off buttons patch.
 
-With the tested toolchain, the full build is byte-identical to the v4 release, SHA-256 `8e7a7ac0f47523a363406e484f1acb881f377921b6f3d3f48e53aa578b7bb6d9`, and a build with `--no-keys` is byte-identical to v3, SHA-256 `c8c522792bf2a70a5be9b3603b7bab010e150a810b5e4f21a175afb0a6f05af9`. Both run on the test player. A different compiler version can produce a different but valid file.
+With the tested toolchain, the full build is byte-identical to the v5 release, SHA-256 `af999b7bf15e4a6412e7fc119bff3e59a4a3cfd2079bcf0e47b9662bdd40936c`, which runs on the test player. To build an earlier release, check out its tag (`v3`, `v4`) first. A different compiler version can produce a different but valid file.
 
 ## Install the firmware on the MECHEN M30
 
@@ -161,7 +162,7 @@ The stock shuffle stores the number of 64-track rows in a single byte. Above 16,
 
 ### Can the MECHEN M30 shuffle all songs on the SD card?
 
-Not with stock firmware: shuffle in the folder view stays inside one folder, and the **All songs** view stops at 4,000 tracks. With the patched firmware, **Repeat all** plus **Shuffle** in the folder view shuffles across every folder on the card, with no track limit.
+Not with stock firmware: shuffle in the folder view stays inside one folder, and the **All songs** view stops at 4,000 tracks. With the patched firmware, **Repeat all** plus **Shuffle** in the folder view shuffles across every folder on the card, with no track limit. Prev and next move backward and forward through the same random order, so prev returns to the song you just heard.
 
 ### How do I scroll faster through folders on the MECHEN M30?
 
@@ -188,7 +189,7 @@ The repository contains these files and folders:
 | `build.sh` | Builds and checks a patched `MECHEN_M30.HEX` from the stock file. |
 | `patches/` | The BPS patch for each release. `tools/bps.py` applies one to the stock `MECHEN_M30.HEX`. |
 | `tools/shuffle/` | Shuffle fix (`shuffle.c`) and its QEMU harness. |
-| `tools/playall/` | Shuffle-all mode: folder walker (A), folder permutation (B), and next-track hook (C), plus the harness. |
+| `tools/playall/` | Shuffle-all mode: folder walker (A), folder permutation (B), next-track hook (C), step back and song choice (D), and prev-track hook (E), plus the harness. |
 | `tools/scroll/` | Scroll acceleration (`accel.c`, `tramp.S`), the app patcher, and the harness. |
 | `tools/keys/` | Screen-off buttons (`keypass.S`), the app patcher, and the harness. |
 | `tools/patch_mengine.py` | Applies the shuffle fix and shuffle-all code to `mengine.ap`. |
@@ -220,7 +221,7 @@ System calls are stubs at the end of the resident code, `li v1,MODULE; break`, w
 | Patch | File | Location |
 |---|---|---|
 | Shuffle fix | `mengine.ap` | Code over the stock `init_shuffle` at `0x7b1a808c`. The stock picker entry `0x7b1a84b0` becomes a branch to the new `shuffle_next`. |
-| Shuffle all songs | `mengine.ap` | A over a dead disk-counting routine at `0x7b068484`, which must end before the live `get_location` at `0x7b06856c`. B at `0x7b1a82ac`. C in the dead picker body at `0x7b1a84b4`. The Repeat All next-track call at `0x7b068088` becomes `jal 0x7b1a84b4`. |
+| Shuffle all songs | `mengine.ap` | A over a dead disk-counting routine at `0x7b068484`, which must end before the live `get_location` at `0x7b06856c`. B at `0x7b1a82ac`. C in the dead picker body at `0x7b1a84b4`. The Repeat All next-track call at `0x7b068088` becomes `jal 0x7b1a84b4`. D in the zero tail of bank 6 at `0x7b1a8754`, and E in the zero tail of bank 2 at `0x7b0a8458`. Both Repeat All prev-track calls (`0x7b0a80de`, `0x7b0a812e`) become `jal 0x7b0a8458`. The bank table entries at `0x718` and `0x748` of `mengine.ap` get larger load sizes (`0x4d8` and `0x7b8`) to cover D and E. |
 | Scroll acceleration | `browser.ap` (file `0x18900`), `music.ap` (file `0x2d200`) | Folder-list bank `0x48714400`. The stock next and prev entries at `0x487144a8` and `0x487146cc` branch to code in the free bank tail at `0x48714a80`. State uses 12 bytes of unused RAM at `0x9fc15bf4`. |
 | Screen-off buttons | `browser.ap`, `music.ap`, `mainmenu.ap`, `playlist.ap`, `setting.ap` | Common key filter bank `0x48694600`. The first instruction of the filter's screen-off wake path, `0x486947d0`, branches to 22 bytes in the free bank tail at `0x48694b80`. That code sends keys `01`, `02`, `03`, `05`, and `06` to the filter's screen-on path and every other key back to the stock wake path. |
 
