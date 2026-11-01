@@ -9,6 +9,8 @@ a bad HEX. Any BPS tool works (Rom Patcher JS, Floating IPS, beat); this one nee
   bps.py create STOCK.HEX PATCHED.HEX OUT.bps
   bps.py apply  STOCK.HEX PATCH.bps   OUT.HEX
 """
+import hashlib
+import os
 import sys
 import zlib
 
@@ -130,9 +132,10 @@ def main(argv):
         sys.exit(f'{argv[0]}: {e}')
     if cmd == 'create' and apply(src, result) != other:
         sys.exit(f'{argv[0]}: internal error: patch does not reproduce {b}')
+    os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
     with open(out, 'wb') as f:
         f.write(result)
-    print(f'wrote {out} ({len(result)} bytes)')
+    print(f'wrote {out} ({len(result)} bytes, SHA-256 {hashlib.sha256(result).hexdigest()})')
 
 
 if __name__ == '__main__':

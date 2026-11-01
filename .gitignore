@@ -6,6 +6,7 @@
 !/LICENSE
 !/build.sh
 !/tools/
+!/patches/
 
 /tools/**/__pycache__/
 /tools/*.pyc
@@ -24,3 +25,5 @@
 *.o
 /build/
 *.bps
+# ...except the release patches, which hold only the changes and apply to the stock HEX
+!/patches/*.bps

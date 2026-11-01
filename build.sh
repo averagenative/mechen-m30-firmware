@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
 # Build patched MECHEN M30 firmware from the official 2025-06-26 MECHEN_M30.HEX.
 #
-# usage: ./build.sh [--test] [--no-playall] STOCK_MECHEN_M30.HEX [OUTDIR]
-#   --test        also run the QEMU harnesses (shuffle, whole-card shuffle, scroll)
-#   --no-playall  leave out whole-card shuffle (shuffle fix + scroll only)
+# usage: ./build.sh [--test] [--no-playall] [--no-keys] STOCK_MECHEN_M30.HEX [OUTDIR]
+#   --test        also run the QEMU harnesses (shuffle, shuffle all, scroll, keys)
+#   --no-playall  leave out shuffle-all mode
+#   --no-keys     leave out the screen-off media keys
 # Writes OUTDIR/MECHEN_M30.HEX (default OUTDIR: build). Tools, overridable from the environment:
 #   CROSS=mips64-linux-gnu-   ATJBOOTTOOL=atjboottool   QEMU=qemu-mipsel-static   PYTHON=python3
 set -euo pipefail
 
-TEST=0 PLAYALL=1
+TEST=0 PLAYALL=1 KEYS=1
 while [ $# -gt 0 ]; do
   case $1 in
     --test) TEST=1; shift ;;
     --no-playall) PLAYALL=0; shift ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    --no-keys) KEYS=0; shift ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) break ;;
   esac
 done
-[ $# -ge 1 ] || { sed -n '2,9p' "$0"; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,10p' "$0"; exit 2; }
+KEY_APPS="browser music mainmenu playlist setting"
 
 ROOT=$(cd "$(dirname "$0")" && pwd); T=$ROOT/tools
 STOCK=$(realpath "$1"); OUT=$(realpath -m "${2:-build}"); W=$OUT/work
@@ -85,10 +88,25 @@ done
 "$PY" -I "$T/scroll/patch_scroll.py" "$F/browser.ap" 0x18900 accel_browser.bin browser.ap "$NX" "$PV"
 "$PY" -I "$T/scroll/patch_scroll.py" "$F/music.ap" 0x2d200 accel_music.bin music.ap "$NX" "$PV"
 echo "   blob $(stat -c %s accel_browser.bin) bytes at 0x48714a80, accel_next 0x$NX, accel_prev 0x$PV"
+PATCHED="mengine.ap browser.ap music.ap"
+
+if [ $KEYS = 1 ]; then
+  echo "== $KEY_APPS: screen-off media keys"
+  "${CROSS}gcc" $CFLAGS -c -o keypass.raw.o "$T/keys/keypass.S"
+  "${CROSS}objcopy" --set-section-alignment .text=4 keypass.raw.o keypass.o
+  "${CROSS}ld" -EL -m elf32ltsmip -Ttext=0x48694b80 -e keypass -o keypass.elf keypass.o
+  "${CROSS}objcopy" -O binary -j .text keypass.elf keypass.bin
+  for app in $KEY_APPS; do
+    [ -f $app.ap ] || cp "$F/$app.ap" $app.ap        # browser and music already carry the scroll patch
+    "$PY" -I "$T/keys/patch_keys.py" $app.ap keypass.bin $app.ap
+    case " $PATCHED " in *" $app.ap "*) ;; *) PATCHED="$PATCHED $app.ap" ;; esac
+  done
+  echo "   hook 0x486947d0 -> keypass at 0x48694b80 in $KEY_APPS"
+fi
 
 echo "== repack"
 "$PY" -I "$T/repack_fw.py" "$STOCK" "$W/stock/dec.bin" "$OUT/MECHEN_M30.HEX" \
-  mengine.ap=mengine.ap browser.ap=browser.ap music.ap=music.ap | tail -n 1 | sed 's/^/   /'
+  $(for f in $PATCHED; do printf '%s=%s ' $f $f; done) | tail -n 1 | sed 's/^/   /'
 
 echo "== verify"
 echo "   $(unpack "$OUT/MECHEN_M30.HEX" "$W/verify") (ok/mismatch)"
@@ -97,10 +115,10 @@ import struct, sys
 d = open(sys.argv[1], "rb").read(); n = struct.unpack_from("<I", d, 16)[0]
 ok = sum(struct.unpack("<%dI" % (n // 4), d[:n])) & 0xffffffff == struct.unpack_from("<I", d, n + 0x10)[0]
 print("   FwuTail", "ok" if ok else "MISMATCH"); sys.exit(not ok)' "$OUT/MECHEN_M30.HEX"
-for f in mengine.ap browser.ap music.ap; do cmp -s $f "$W/verify/fw/$f" || { echo "   extracted $f differs from the patched input"; exit 1; }; done
+for f in $PATCHED; do cmp -s $f "$W/verify/fw/$f" || { echo "   extracted $f differs from the patched input"; exit 1; }; done
 changed=$(for f in "$F"/*; do b=$(basename "$f"); cmp -s "$f" "$W/verify/fw/$b" || printf '%s ' "$b"; done)
 echo "   files changed from stock: $changed"
-[ "$changed" = "browser.ap mengine.ap music.ap " ] || { echo "   unexpected set of changed files"; exit 1; }
+[ "$changed" = "$(printf '%s\n' $PATCHED | sort | tr '\n' ' ')" ] || { echo "   unexpected set of changed files"; exit 1; }
 "$PY" -I "$T/refscan.py" mengine.ap 0x7300:0x7b068000:0x800 0x8d00:0x7b1a8000:0x800 > refscan.txt
 
 if [ $TEST = 1 ]; then
@@ -147,7 +165,23 @@ if [ $TEST = 1 ]; then
   else
     echo "   scroll:   SLOW CLICKS DIFFER FROM STOCK"
   fi
-  fails=$(cat test_*.txt t_scroll/out_patched_*.txt | grep -c -E 'FAIL|MISMATCH|INVARIANT|FLAGS' || true)
+  if [ $KEYS = 1 ]; then
+    mkdir -p t_keys; cd t_keys
+    "${CROSS}gcc" $HFLAGS -c -o harness.o "$T/keys/harness.c"
+    for app in $KEY_APPS; do
+      "$PY" -I "$T/keys/patch_keys.py" --testbanks "$F/$app.ap" ../keypass.bin .
+      printf '\t.section .bankrun,"awx"\n\t.globl bank_run\nbank_run:\t.space 0x600\n\t.section .rodata\n\t.globl bank_stock, bank_patched\nbank_stock:\t.incbin "%s"\nbank_patched:\t.incbin "%s"\n' \
+        "$PWD/bank_stock_test.bin" "$PWD/bank_patched_test.bin" > banks.s
+      "${CROSS}as" -EL -mabi=32 -mips32 -o banks.o banks.s
+      "${CROSS}ld" -EL -m elf32ltsmip -T "$T/keys/test.ld" -o test_$app.elf harness.o banks.o
+      timeout 300 "$QEMU" -cpu 24Kc ./test_$app.elf > ../test_keys_$app.txt || true
+      echo "   keys:     $app: $(tail -n 2 ../test_keys_$app.txt | tr '\n' ' ')"
+    done
+    cd ..
+  fi
+  for f in test_*.txt; do grep -q '^ALL PASS' $f || { echo "   $f: no ALL PASS line"; echo FAIL >> missing_pass.txt; }; done
+  for f in t_scroll/out_*.txt; do grep -q '^events 30000 .* failures 0$' $f || { echo "   $f: incomplete"; echo FAIL >> missing_pass.txt; }; done
+  fails=$(cat test_*.txt t_scroll/out_patched_*.txt missing_pass.txt 2>/dev/null | grep -c -E 'FAIL|MISMATCH|INVARIANT|FLAGS' || true)
   slow_same=$(cmp -s <(tail -n +2 t_scroll/out_stock_1.txt) <(tail -n +2 t_scroll/out_patched_1.txt) && echo 1 || echo 0)
   [ "$fails" = 0 ] && [ "$slow_same" = 1 ] || { echo "   TESTS FAILED (logs in $W)"; exit 1; }
 fi

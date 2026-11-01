@@ -1,6 +1,6 @@
-# MECHEN M30 custom firmware: shuffle fix, shuffle all songs, and fast scrolling
+# MECHEN M30 custom firmware: shuffle fix, shuffle all songs, fast scrolling, and screen-off buttons
 
-Unofficial firmware patches for the **MECHEN M30 HiFi MP3 player**. They fix the broken shuffle on large music libraries, add a shuffle-all-songs mode to the folder view, and add scroll-wheel acceleration so you can move through thousands of folders quickly. The patches apply to the official MECHEN M30 firmware release dated 2025-06-26 (`MECHEN_M30.HEX`) and install through the player's normal firmware update. You can apply a patch from a [release](#download-a-patched-release) or [build the firmware](#build-the-firmware) yourself.
+Unofficial firmware patches for the **MECHEN M30 HiFi MP3 player**. They fix the broken shuffle on large music libraries, add a shuffle-all-songs mode to the folder view, add scroll-wheel acceleration so you can move through thousands of folders quickly, and make the play, track, and volume buttons work while the screen is off. The patches apply to the official MECHEN M30 firmware release dated 2025-06-26 (`MECHEN_M30.HEX`) and install through the player's normal firmware update. You can download the patched firmware from a [release](#download-a-patched-release), [make it from the stock file](#make-the-patched-firmware-from-the-stock-file) with one Python command, or [build it from source](#build-the-firmware).
 
 The MECHEN M30 is built on an Actions Semiconductor ATJ2127-family chip (USB ID `10d6:1101`). This repository also includes tools to decrypt, unpack, modify, and repack Actions ATJ2127 FWU firmware files, which can help with reverse engineering similar Actions-based MP3 players.
 
@@ -8,47 +8,72 @@ The MECHEN M30 is built on an Actions Semiconductor ATJ2127-family chip (USB ID 
 
 ## What the patches fix
 
-The patches change three things in the stock MECHEN M30 firmware:
+The patches change four things in the stock MECHEN M30 firmware:
 
 - **Shuffle fix.** On a large SD card, stock shuffle plays the same small part of the library, mostly artists that start with A, B, or C. The patch replaces the stock shuffle with one that reaches every track on the card.
 - **Shuffle all songs from folder view.** Stock firmware only shuffles inside the current folder. With **Repeat all** and **Shuffle** on, the patched player shuffles across every folder on the card.
 - **Scroll-wheel acceleration.** Stock firmware moves one item per wheel click. The patched folder view speeds up while you keep turning the wheel: 1, then 5, 20, 50, and 100 items per click. A pause of 0.7 seconds or a change of direction drops back to 1, and fast scrolling stops at the top and bottom of the list instead of wrapping.
+- **Buttons work with the screen off.** With stock firmware, after the backlight timer turns the screen off, the first press of any button only turns the screen back on, and the press is lost. With the patch, the play/pause, prev, next, volume up, and volume down buttons act immediately and the screen stays off. The wheel, OK, and back buttons still turn the screen on, and the power button still turns it on or off.
 
 ## Supported players and firmware
 
 The patches work only with this combination:
 
 - **Player:** MECHEN M30 with the Actions firmware line. MECHEN publishes these releases as date-named folders (for example 2022-08-16 and 2025-06-26) that contain `MECHEN_M30.HEX` and a `.fw` file.
-- **Firmware:** the 2025-06-26 `MECHEN_M30.HEX`, SHA-256 `6c7e27c8c90c4942664d66a0d6c9f9e48f8d3bc7d2d24223568255e233551258`. MECHEN distributes it from a public Google Drive folder, `1Y9v8c6FLR5lbxLY-PhAv-BQOeQa2BNev`.
+- **Firmware:** the 2025-06-26 `MECHEN_M30.HEX`, SHA-256 `6c7e27c8c90c4942664d66a0d6c9f9e48f8d3bc7d2d24223568255e233551258`. MECHEN distributes it from a [public Google Drive folder](https://drive.google.com/drive/folders/1Y9v8c6FLR5lbxLY-PhAv-BQOeQa2BNev), in the `2025-06-26` folder ([direct link](https://drive.google.com/file/d/1lTyyP05toQHbcnmmiK3R9FFToj9RZfxC/view)).
 
 Other firmware versions don't work, because the patches use fixed code addresses. The build checks the stock bytes at every patch site and stops if they don't match. The "Version 2.0" release (`SDM30008.img`) is for a different board with a Rockchip RKnano chip, and these patches don't apply to it.
 
-The full build runs on a MECHEN M30 with a 256 GB exFAT card that holds about 18,000 tracks.
+The shuffle fix, shuffle-all mode, and scroll acceleration run on a MECHEN M30 with a 256 GB exFAT card that holds about 18,000 tracks. The screen-off buttons patch passes its QEMU tests and hasn't been confirmed on the player yet. To build without it, use `--no-keys`.
 
 ## Known limitations
 
 These issues are still present in the patched firmware:
 
 - The first song you play in shuffle-all mode starts after a short delay while the player walks the card's folder tree.
-- With the screen off or dimmed, the prev, next, and volume buttons do nothing until you press the power button. This is stock behavior.
+- With the screen off, the buttons act on whichever screen was open when it turned off. On the now-playing screen, prev and next change tracks. In the folder view, they move the hidden selection instead, the same as they do with the screen on.
 - The **All songs** library view still stops at 4,000 tracks. The library builder in the stock firmware sets that limit. The folder view and shuffle-all mode aren't limited.
 
 ## Download a patched release
 
-Each release on the [releases page](https://github.com/averagenative/mechen-m30-firmware/releases) has a small BPS patch file instead of the patched firmware, because the firmware itself belongs to MECHEN. You apply the patch to the stock `MECHEN_M30.HEX` to get the patched one. A BPS patch carries CRC-32 checksums of the stock file and the result, so patch tools refuse to apply it to the wrong file.
+Each release on the [releases page](https://github.com/averagenative/mechen-m30-firmware/releases) has two files:
 
-To make the patched firmware from a release:
+- `MECHEN_M30.HEX`: the patched firmware, ready to [install](#install-the-firmware-on-the-mechen-m30).
+- `MECHEN_M30-vN.bps`: a small patch that turns the stock 2025-06-26 firmware into the same patched file. The [`patches`](patches) folder of this repository holds the same patch files.
 
-1. Download the stock 2025-06-26 `MECHEN_M30.HEX` from MECHEN's Google Drive folder, as described in [Supported players and firmware](#supported-players-and-firmware).
-1. Download the `.bps` file from the release.
-1. Apply the patch with one of these tools:
-   - In a web browser, open [Rom Patcher JS](https://www.marcrobledo.com/RomPatcher.js/). Select the stock `MECHEN_M30.HEX` as the ROM file and the `.bps` file as the patch, and then click **Apply patch**.
-   - On Windows or Linux, use [Floating IPS](https://github.com/Alcaro/Flips).
-   - With Python 3, run `python3 tools/bps.py apply MECHEN_M30.HEX MECHEN_M30-v3.bps MECHEN_M30-patched.HEX`.
-1. If the tool gave the patched file another name, rename it to `MECHEN_M30.HEX`.
-1. Optional: Check that the patched file's SHA-256 matches the one in the release notes.
+## Make the patched firmware from the stock file
 
-Then [install the firmware](#install-the-firmware-on-the-mechen-m30).
+Instead of downloading the patched firmware, you can make it from MECHEN's stock firmware with one Python command. The patch holds only the changes, and it checks the stock file before it writes anything. You need Git and Python 3.
+
+1. Clone this repository:
+
+   ```
+   git clone https://github.com/averagenative/mechen-m30-firmware.git
+   ```
+
+1. Go to the repository folder:
+
+   ```
+   cd mechen-m30-firmware
+   ```
+
+1. Download the stock 2025-06-26 [`MECHEN_M30.HEX`](https://drive.google.com/file/d/1lTyyP05toQHbcnmmiK3R9FFToj9RZfxC/view) from MECHEN's Google Drive, and save it in the repository folder. To download it from the command line instead, run:
+
+   ```
+   curl -L -o MECHEN_M30.HEX 'https://drive.google.com/uc?export=download&id=1lTyyP05toQHbcnmmiK3R9FFToj9RZfxC'
+   ```
+
+1. Apply the patch for the version you want. For example, for v4:
+
+   ```
+   python3 tools/bps.py apply MECHEN_M30.HEX patches/MECHEN_M30-v4.bps build/MECHEN_M30.HEX
+   ```
+
+   The command writes `build/MECHEN_M30.HEX` and prints its SHA-256, which matches the one in the release notes. If the stock file isn't the 2025-06-26 release, the command stops with an error and writes nothing.
+
+1. [Install the firmware](#install-the-firmware-on-the-mechen-m30) from `build/MECHEN_M30.HEX`.
+
+To apply a patch without Git or Python, open [Rom Patcher JS](https://www.marcrobledo.com/RomPatcher.js/) in a web browser. Select the stock `MECHEN_M30.HEX` as the ROM file and the `.bps` file as the patch, click **Apply patch**, and then rename the result to `MECHEN_M30.HEX`. [Floating IPS](https://github.com/Alcaro/Flips) on Windows or Linux also works.
 
 ## Build the firmware
 
@@ -83,17 +108,18 @@ ATJBOOTTOOL=rockbox/utils/atj2137/atjboottool/atjboottool ./build.sh --test path
 The script writes `build/MECHEN_M30.HEX` and keeps intermediate files in `build/work/`. It runs these steps:
 
 1. Decrypts and unpacks the stock firmware.
-1. Compiles the patch code to MIPS16e and patches `mengine.ap`, `browser.ap`, and `music.ap`.
+1. Compiles the patch code to MIPS16e and patches `mengine.ap`, `browser.ap`, `music.ap`, `mainmenu.ap`, `playlist.ap`, and `setting.ap`.
 1. Repacks the firmware with `tools/repack_fw.py`, which recomputes every checksum and re-encrypts the file.
-1. Unpacks the result again and checks every checksum, the trailer sum, and that exactly the three patched files differ from stock.
-1. With `--test`, runs the QEMU test harnesses. They run the patch code, and for scrolling the real stock list code, on an emulated MIPS 24Kc CPU.
+1. Unpacks the result again and checks every checksum, the trailer sum, and that exactly the patched files differ from stock.
+1. With `--test`, runs the QEMU test harnesses on an emulated MIPS 24Kc CPU. The scroll and screen-off buttons tests run the real stock code from the firmware, stock and patched side by side.
 
 The script takes these options:
 
 - `--test`: runs the QEMU tests. They take a few minutes.
-- `--no-playall`: leaves out shuffle-all mode and builds only the shuffle fix and scroll acceleration.
+- `--no-playall`: leaves out shuffle-all mode.
+- `--no-keys`: leaves out the screen-off buttons patch.
 
-With the tested toolchain, the full build is byte-identical to the build that runs on the test player, SHA-256 `c8c522792bf2a70a5be9b3603b7bab010e150a810b5e4f21a175afb0a6f05af9`. A different compiler version can produce a different but valid file.
+With the tested toolchain, a build with `--no-keys` is byte-identical to the build that runs on the test player, SHA-256 `c8c522792bf2a70a5be9b3603b7bab010e150a810b5e4f21a175afb0a6f05af9`. A different compiler version can produce a different but valid file.
 
 ## Install the firmware on the MECHEN M30
 
@@ -141,6 +167,10 @@ Not with stock firmware: shuffle in the folder view stays inside one folder, and
 
 Install the patched firmware and keep turning the wheel. After about one second of steady turning, each click moves 5 items. After 2.5 seconds it moves 20, after 4 seconds 50, and after 6 seconds 100.
 
+### Why don't the MECHEN M30 buttons work when the screen is off?
+
+In stock firmware, every app passes button presses through a common key filter. While the screen is off, the filter turns any press except power into a "wake the screen" message and discards the press. The wake handler then records which button woke the screen, and the filter also discards that button's long-press and release events, so the press does nothing except turn the screen on. The patch lets play/pause, prev, next, and volume through to the app with the screen left off.
+
 ### Why does the MECHEN M30 library stop at 4,000 songs?
 
 The stock library builder (`playlist.ap`) holds the library in a fixed RAM buffer that fits 4,000 tracks. These patches don't change that limit. Use the folder view, which isn't limited.
@@ -156,9 +186,11 @@ The repository contains these files and folders:
 | Path | Contents |
 |---|---|
 | `build.sh` | Builds and checks a patched `MECHEN_M30.HEX` from the stock file. |
+| `patches/` | The BPS patch for each release. `tools/bps.py` applies one to the stock `MECHEN_M30.HEX`. |
 | `tools/shuffle/` | Shuffle fix (`shuffle.c`) and its QEMU harness. |
 | `tools/playall/` | Shuffle-all mode: folder walker (A), folder permutation (B), and next-track hook (C), plus the harness. |
 | `tools/scroll/` | Scroll acceleration (`accel.c`, `tramp.S`), the app patcher, and the harness. |
+| `tools/keys/` | Screen-off buttons (`keypass.S`), the app patcher, and the harness. |
 | `tools/patch_mengine.py` | Applies the shuffle fix and shuffle-all code to `mengine.ap`. |
 | `tools/bps.py` | Creates and applies the BPS patches that releases use. |
 | `tools/repack_fw.py`, `tools/fwu_repack.py` | Rebuild the FWU, AFI, and FWIMAGE.FW layers with new checksums and encryption. |
@@ -179,7 +211,7 @@ These notes describe the parts of the firmware that the patches depend on. All a
 
 ### App overlays and banks
 
-An `.ap` file has a header with the resident code (file offset `0xc00`, loaded at `0xbfc16400`), a data segment, an entry point, and a bank table at `0x100` of `{file offset, load address, size}` entries. Code is MIPS16e. Banks load on demand: a call into a bank that isn't loaded raises an exception, and the kernel loads the bank and retries the call. Some bank groups aren't in the table. The music engine's group `0x7b` has bank 1 at file `0x7300` (loaded at `0x7b068000`) and bank 6 at file `0x8d00` (loaded at `0x7b1a8000`).
+An `.ap` file has a header with the resident code (file offset `0xc00`, loaded at `0xbfc16400`), a data segment, an entry point, and a bank table at `0x100` of `{file offset, load address, size}` entries. Code is MIPS16e. Banks load on demand: a call into a bank that isn't loaded raises an exception, and the kernel loads the bank and retries the call. The table holds 12-byte entries in blocks of 64 per bank group, and the kernel loads exactly the listed size of a bank. The music engine's group `0x7b` sits at `0x700`, past the part of the table that most tools read. It has bank 1 at file `0x7300` (loaded at `0x7b068000`), bank 2 at file `0x7b00` (loaded at `0x7b0a8000`), and bank 6 at file `0x8d00` (loaded at `0x7b1a8000`).
 
 System calls are stubs at the end of the resident code, `li v1,MODULE; break`, with the function ID as the last argument. The patches use module `0x0f` (kernel: function `0x1c` is the millisecond clock, `0x35` is the random number generator) and module `0x11` (file system).
 
@@ -190,6 +222,7 @@ System calls are stubs at the end of the resident code, `li v1,MODULE; break`, w
 | Shuffle fix | `mengine.ap` | Code over the stock `init_shuffle` at `0x7b1a808c`. The stock picker entry `0x7b1a84b0` becomes a branch to the new `shuffle_next`. |
 | Shuffle all songs | `mengine.ap` | A over a dead disk-counting routine at `0x7b068484`, which must end before the live `get_location` at `0x7b06856c`. B at `0x7b1a82ac`. C in the dead picker body at `0x7b1a84b4`. The Repeat All next-track call at `0x7b068088` becomes `jal 0x7b1a84b4`. |
 | Scroll acceleration | `browser.ap` (file `0x18900`), `music.ap` (file `0x2d200`) | Folder-list bank `0x48714400`. The stock next and prev entries at `0x487144a8` and `0x487146cc` branch to code in the free bank tail at `0x48714a80`. State uses 12 bytes of unused RAM at `0x9fc15bf4`. |
+| Screen-off buttons | `browser.ap`, `music.ap`, `mainmenu.ap`, `playlist.ap`, `setting.ap` | Common key filter bank `0x48694600`. The first instruction of the filter's screen-off wake path, `0x486947d0`, branches to 22 bytes in the free bank tail at `0x48694b80`. That code sends keys `01`, `02`, `03`, `05`, and `06` to the filter's screen-on path and every other key back to the stock wake path. |
 
 ### Keys
 
@@ -205,7 +238,7 @@ Key map records are 6 bytes: `{u8 key, u8 0, u16 type, u16 message}`. Key types 
 | `80` | Back |
 | `81` | Power |
 
-Each app filters keys through a common hook at `0x48694658`. With the screen off, the hook turns any key other than power into a wake message and discards the key.
+Each app filters keys through a common function, `FUN_48694658` in bank `0x48694600`. The system state at `0x9fc1a1c8` holds the screen state at `+0x18` (0 on, 2 off) and the key that woke the screen at `+3`. With the screen off, stock firmware turns any key other than power into message `0x106` (wake) and discards it. The `0x106` handler records the key at `+3`, and the filter discards that key's later events until it's released. The screen-off message `0x105` turns off the backlight and LCD and sets scene `0x89`, which pauses the playing screen's refresh timers. Waking requests a full redraw.
 
 ## License
 
