@@ -174,7 +174,7 @@ In stock firmware, every app passes button presses through a common key filter. 
 
 ### Why does the MECHEN M30 library stop at 4,000 songs?
 
-The stock library builder (`playlist.ap`) holds the library in a fixed RAM buffer that fits 4,000 tracks. These patches don't change that limit. Use the folder view, which isn't limited.
+The stock library builder (`playlist.ap`) holds its sort tables in a fixed 120 KB RAM region that fits 4,000 tracks. These patches don't change that limit. Use the folder view, which isn't limited. `docs/library-builder.md` explains how the builder works and what a whole-card library would take.
 
 ### Do these tools work with other Actions ATJ2127 MP3 players?
 

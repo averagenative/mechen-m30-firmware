@@ -7,6 +7,7 @@
 !/build.sh
 !/tools/
 !/patches/
+!/docs/
 
 /tools/**/__pycache__/
 /tools/*.pyc
