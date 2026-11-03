@@ -12,7 +12,7 @@ import sys
 BANKS = {0x400d4c00: 0x3400, 0x40114c00: 0x3c00, 0x40194c00: 0x4c00, 0x40294c00: 0x6c00,
          0x48014400: 0x7400, 0x71812500: 0xa400}
 RAM_PLAYER, RAM_TEST = 0x9fc00000, 0x10000000
-STUB_LIBC, STUB_FS, STUB_APPEND, STUB_NOP, STUB_TEXT = 0x00700000, 0x00700400, 0x00700800, 0x00700c00, 0x00701000
+STUB_LIBC, STUB_FS, STUB_APPEND, STUB_NOP, STUB_TEXT = 0x00700000, 0x00700400, 0x00700a00, 0x00700c00, 0x00701000
 RESIDENT = {0xbfc16409: STUB_LIBC,    # module 0x10: copy, fill, length
             0xbfc1640d: STUB_FS,      # module 0x11: file system
             0xbfc16411: STUB_APPEND,  # resident: append whole sectors, advance the sector counter

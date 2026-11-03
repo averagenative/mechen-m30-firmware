@@ -1,20 +1,33 @@
 #!/usr/bin/env bash
 # Build patched MECHEN M30 firmware from the official 2025-06-26 MECHEN_M30.HEX.
 #
-# usage: ./build.sh [--test] [--no-playall] [--no-keys] STOCK_MECHEN_M30.HEX [OUTDIR]
-#   --test        also run the QEMU harnesses (shuffle, shuffle all, scroll, keys)
+# usage: ./build.sh [--test] [--no-playall] [--no-keys] [--no-library] STOCK_MECHEN_M30.HEX [OUTDIR]
+#   --test        also run the QEMU harnesses (shuffle, shuffle all, scroll, keys, library)
 #   --no-playall  leave out shuffle-all mode
 #   --no-keys     leave out the screen-off media keys
+#   --no-library  leave out the whole-card library (keep the stock 4,000-song limit)
+#   --library-bench  diagnostic: scan 100 files, then time the file operations (tools/library/bench.c)
+#   --library-probe  diagnostic: scan 100 files, run the real passes, leave MUSIC.TMP and the
+#                    passes' globals on the card for comparison with the harness
+#   --library-iotest diagnostic: scan 100 files, then test the kernel's reads and writes on a
+#                    4 MB MUSIC.TMP and the library (tools/library/iotest.c)
+#   --library-replay diagnostic: scan 100 files, then replay the passes' file operations from
+#                    IOTEST.OPS in the card root with self-describing data (tools/library/replay.c)
 # Writes OUTDIR/MECHEN_M30.HEX (default OUTDIR: build). Tools, overridable from the environment:
 #   CROSS=mips64-linux-gnu-   ATJBOOTTOOL=atjboottool   QEMU=qemu-mipsel-static   PYTHON=python3
 set -euo pipefail
 
-TEST=0 PLAYALL=1 KEYS=1
+TEST=0 PLAYALL=1 KEYS=1 LIBRARY=1 LIB_MAX=24000 LIB_SRC=index.c LIB_PREALLOC= LIB_DEFS=
 while [ $# -gt 0 ]; do
   case $1 in
     --test) TEST=1; shift ;;
     --no-playall) PLAYALL=0; shift ;;
     --no-keys) KEYS=0; shift ;;
+    --no-library) LIBRARY=0; shift ;;
+    --library-bench) LIB_SRC=bench.c; LIB_PREALLOC=$LIB_MAX; LIB_MAX=100; shift ;;
+    --library-probe) LIB_DEFS=-DPROBE; LIB_PREALLOC=$LIB_MAX; LIB_MAX=100; shift ;;
+    --library-iotest) LIB_SRC=iotest.c; LIB_PREALLOC=$LIB_MAX; LIB_MAX=100; shift ;;
+    --library-replay) LIB_SRC=replay.c; LIB_PREALLOC=$LIB_MAX; LIB_MAX=100; shift ;;
     -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) break ;;
   esac
@@ -50,7 +63,12 @@ blob() {  # NAME SOURCE ADDR [CFLAGS...]: compile one MIPS16e unit linked at ADD
   local n=$1 src=$2 at=$3; shift 3
   "${CROSS}gcc" $CFLAGS "$@" -c -o "$n.raw.o" "$src"
   "${CROSS}objcopy" --set-section-alignment .text=4 "$n.raw.o" "$n.o"
-  "${CROSS}ld" -EL -m elf32ltsmip -Ttext="$at" -e "$at" -o "$n.elf" "$n.o"
+  # string literals and const tables (.rodata) go right after the code: the blob is only what
+  # the linker puts in .text, and the firmware has nowhere else to load from
+  printf 'SECTIONS { . = %s; .text : { *(.text .text.*) *(.rodata .rodata.*) }\n' "$at" > "$n.ld"
+  printf ' /DISCARD/ : { *(.MIPS.abiflags) *(.reginfo) *(.pdr) *(.comment) *(.gnu.attributes) *(.mdebug*) } }\n' >> "$n.ld"
+  "${CROSS}ld" -EL -m elf32ltsmip -T "$n.ld" -e "$at" -o "$n.elf" "$n.o"
+  [ -z "$("${CROSS}size" -A "$n.elf" | awk '$1 ~ /^\.(s?data|s?bss)/ && $2 > 0')" ] || { echo "$n: has writable data, which a blob can't carry"; exit 1; }
   "${CROSS}objcopy" -O binary -j .text "$n.elf" "$n.bin"
 }
 sym() { "${CROSS}nm" "$1" | awk -v s="$2" '$3==s{print $1}'; }
@@ -112,6 +130,23 @@ if [ $KEYS = 1 ]; then
     case " $PATCHED " in *" $app.ap "*) ;; *) PATCHED="$PATCHED $app.ap" ;; esac
   done
   echo "   hook 0x486947d0 -> keypass at 0x48694b80 in $KEY_APPS"
+fi
+
+if [ $LIBRARY = 1 ]; then
+  echo "== playlist.ap: whole-card library (up to $LIB_MAX songs$([ $LIB_SRC != index.c ] && echo ", DIAGNOSTIC BUILD: $LIB_SRC")$([ -n "$LIB_DEFS" ] && echo ", DIAGNOSTIC PROBE BUILD"))"
+  blob libindex "$T/library/$LIB_SRC" 0xbfc3c000 $LIB_DEFS
+  blob libload "$T/library/loader.c" 0x400d5290
+  # the stock caller jumps to the first byte of each blob: the entry function must be first
+  [ "$(sym libindex.elf index_passes)" = "bfc3c000" ] || { echo "index_passes is not at the start of the passes blob"; exit 1; }
+  [ "$(sym libload.elf load_and_run)" = "400d5290" ] || { echo "load_and_run is not at the start of the loader"; exit 1; }
+  [ -f playlist.ap ] || cp "$F/playlist.ap" playlist.ap
+  "$PY" -I "$T/library/patch_library.py" playlist.ap libload.bin libindex.bin playlist.ap $LIB_MAX $LIB_PREALLOC | sed 's/^/   /'
+  for app in music browser mainmenu; do
+    [ -f $app.ap ] || cp "$F/$app.ap" $app.ap
+    "$PY" -I "$T/library/patch_library.py" --reader $app.ap $app.ap $LIB_MAX | sed 's/^/   /'
+  done
+  case " $PATCHED " in *" playlist.ap "*) ;; *) PATCHED="$PATCHED playlist.ap" ;; esac
+  case " $PATCHED " in *" mainmenu.ap "*) ;; *) PATCHED="$PATCHED mainmenu.ap" ;; esac
 fi
 
 echo "== repack"
@@ -189,6 +224,12 @@ if [ $TEST = 1 ]; then
       echo "   keys:     $app: $(tail -n 2 ../test_keys_$app.txt | tr '\n' ' ')"
     done
     cd ..
+  fi
+  if [ $LIBRARY = 1 ]; then
+    mkdir -p t_library
+    "$PY" -I "$T/library/mklib.py" 6000 t_library/lib6k.lib > /dev/null
+    CROSS=$CROSS QEMU=$QEMU PYTHON=$PY "$T/library/test.sh" "$F/playlist.ap" t_library/lib6k.lib t_library new > test_library.txt 2>&1 || true
+    echo "   library:  $(grep -m1 -E 'reproduced|MISMATCH' test_library.txt || echo 'no result')"
   fi
   for f in test_*.txt; do grep -q '^ALL PASS' $f || { echo "   $f: no ALL PASS line"; echo FAIL >> missing_pass.txt; }; done
   for f in t_scroll/out_*.txt; do grep -q '^events 30000 .* failures 0$' $f || { echo "   $f: incomplete"; echo FAIL >> missing_pass.txt; }; done

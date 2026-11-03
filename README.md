@@ -8,11 +8,12 @@ The MECHEN M30 is built on an Actions Semiconductor ATJ2127-family chip (USB ID 
 
 ## What the patches fix
 
-The patches change four things in the stock MECHEN M30 firmware:
+The patches change five things in the stock MECHEN M30 firmware:
 
 - **Shuffle fix.** On a large SD card, stock shuffle plays the same small part of the library, mostly artists that start with A, B, or C. The patch replaces the stock shuffle with one that reaches every track on the card.
 - **Shuffle all songs from folder view.** Stock firmware only shuffles inside the current folder. With **Repeat all** and **Shuffle** on, the patched player shuffles across every folder on the card, and prev steps back through the songs it already played.
 - **Scroll-wheel acceleration.** Stock firmware moves one item per wheel click. The patched folder view speeds up while you keep turning the wheel: 1, then 5, 20, 50, and 100 items per click. A pause of 0.7 seconds or a change of direction drops back to 1, and fast scrolling stops at the top and bottom of the list instead of wrapping.
+- **Whole-card music library.** The stock library builder stops at 4,000 songs, so on a big card **Music** > **All songs**, **Artists**, **Albums**, and **Genres** only cover the first artists alphabetically. The patched builder indexes up to 24,000 songs by sorting through a scratch file on the card instead of RAM. It has built a 15,991-song library on one player, checked table by table against a PC model. It also lists a name stored in two text encodings as one artist or album instead of two. **Experimental:** tested on one player and one card so far, and a full "filelist update" of a 16,000-song card takes 20 to 25 minutes (the stock scan reads every file's tags at about 0.1 s per file), which the player runs after every USB disconnect. Not recommended for most people until the unchanged-card check is in. `docs/library-builder.md` has the details and `./build.sh --no-library` leaves it out.
 - **Buttons work with the screen off.** With stock firmware, after the backlight timer turns the screen off, the first press of any button only turns the screen back on, and the press is lost. With the patch, the play/pause, prev, next, volume up, and volume down buttons act immediately and the screen stays off. The wheel, OK, and back buttons still turn the screen on, and the power button still turns it on or off.
 
 ## Supported players and firmware
@@ -33,7 +34,8 @@ These issues are still present in the patched firmware:
 - The first song you play in shuffle-all mode starts after a short delay while the player walks the card's folder tree.
 - In shuffle-all mode, prev goes back only as far as the first song that shuffle-all chose in the current pass over the card. From there, prev works as in stock firmware and picks another song in the same folder. After the player has played every folder once, it starts a new random order, and prev can't go back past that point.
 - With the screen off, the buttons act on whichever screen was open when it turned off. On the now-playing screen, prev and next change tracks. In the folder view, they move the hidden selection instead, the same as they do with the screen on.
-- The **All songs** library view still stops at 4,000 tracks. The library builder in the stock firmware sets that limit. The folder view and shuffle-all mode aren't limited.
+- The library views stop at 24,000 tracks, and the M3U playlist views still stop at 4,000 entries per playlist. The folder view and shuffle-all mode aren't limited.
+- The "filelist update" after each unplug reads the tags of every song on the card at about 0.1 s each, so with the whole-card library it takes 20 to 25 minutes for 16,000 songs instead of 8 minutes for the stock 4,000. An interrupted update restarts at the next boot. The library builder needs about 270 bytes of free card space per song for a scratch file, `MUSIC.TMP` in the card root, which it deletes when the update finishes. Names with characters outside Latin-1 (curly quotes, ellipses, accented letters beyond U+00FF) may sort in a slightly different place than expected.
 
 ## Download a patched release
 
@@ -130,7 +132,7 @@ The patched firmware installs the same way as an official MECHEN M30 firmware up
 1. If the card already has a `MECHEN_M30.HEX` or `MECHEN_M30~.HEX` in its root folder, delete it. The player only updates when exactly one firmware file is present.
 1. Copy the patched `MECHEN_M30.HEX`, from a release or from `build/`, to the root folder of the card.
 1. Eject the player and unplug it.
-1. Wait for the player to finish "filelist update". On a large card, it takes several minutes.
+1. Wait for the player to finish "filelist update". On a large card, it takes several minutes, and much longer (see the known issues) once the whole-card library patch is installed.
 1. In the main menu, go to **Setting** > **Auto upgrade**.
 1. When the player shows "Select to upgrade with[MECHEN_M30.HEX]", confirm it.
 1. Leave the player on while it shows "Please do not power off during firmware upgrade", until it shows "firmware upgrade succeed".
@@ -174,7 +176,7 @@ In stock firmware, every app passes button presses through a common key filter. 
 
 ### Why does the MECHEN M30 library stop at 4,000 songs?
 
-The stock library builder (`playlist.ap`) holds its sort tables in a fixed 120 KB RAM region that fits 4,000 tracks. These patches don't change that limit. Use the folder view, which isn't limited. `docs/library-builder.md` explains how the builder works and what a whole-card library would take.
+The stock library builder (`playlist.ap`) holds its sort tables in a fixed 120 KB RAM region that fits 4,000 tracks. The whole-card library patch replaces its sorting with one that works through the card and raises the limit to 24,000. `docs/library-builder.md` explains how the builder works and what the patch changes.
 
 ### Do these tools work with other Actions ATJ2127 MP3 players?
 
@@ -192,7 +194,7 @@ The repository contains these files and folders:
 | `tools/playall/` | Shuffle-all mode: folder walker (A), folder permutation (B), next-track hook (C), step back and song choice (D), and prev-track hook (E), plus the harness. |
 | `tools/scroll/` | Scroll acceleration (`accel.c`, `tramp.S`), the app patcher, and the harness. |
 | `tools/keys/` | Screen-off buttons (`keypass.S`), the app patcher, and the harness. |
-| `tools/library/` | Library builder work in progress: a QEMU harness that runs the stock MUSIC.LIB index passes (`harness.c`, `testbanks.py`, `test.sh`) and `libdiff.py` to compare two libraries. See `docs/library-builder.md`. |
+| `tools/library/` | Whole-card library: the file-backed index passes (`index.c`), their loader (`loader.c`), the app patcher (`patch_library.py`), the QEMU harness that runs the stock or the new passes (`harness.c`, `testbanks.py`, `test.sh`), a Python model of the new passes (`libmodel.py`), a synthetic library generator (`mklib.py`), and library comparison tools (`libdiff.py`, `libgroups.py`). See `docs/library-builder.md`. |
 | `tools/patch_mengine.py` | Applies the shuffle fix and shuffle-all code to `mengine.ap`. |
 | `tools/bps.py` | Creates and applies the BPS patches that releases use. |
 | `tools/repack_fw.py`, `tools/fwu_repack.py` | Rebuild the FWU, AFI, and FWIMAGE.FW layers with new checksums and encryption. |
@@ -224,6 +226,7 @@ System calls are stubs at the end of the resident code, `li v1,MODULE; break`, w
 | Shuffle fix | `mengine.ap` | Code over the stock `init_shuffle` at `0x7b1a808c`. The stock picker entry `0x7b1a84b0` becomes a branch to the new `shuffle_next`. |
 | Shuffle all songs | `mengine.ap` | A over a dead disk-counting routine at `0x7b068484`, which must end before the live `get_location` at `0x7b06856c`. B at `0x7b1a82ac`. C in the dead picker body at `0x7b1a84b4`. The Repeat All next-track call at `0x7b068088` becomes `jal 0x7b1a84b4`. D in the zero tail of bank 6 at `0x7b1a8754`, and E in the zero tail of bank 2 at `0x7b0a8458`. Both Repeat All prev-track calls (`0x7b0a80de`, `0x7b0a812e`) become `jal 0x7b0a8458`. The bank table entries at `0x718` and `0x748` of `mengine.ap` get larger load sizes (`0x4d8` and `0x7b8`) to cover D and E. |
 | Scroll acceleration | `browser.ap` (file `0x18900`), `music.ap` (file `0x2d200`) | Folder-list bank `0x48714400`. The stock next and prev entries at `0x487144a8` and `0x487146cc` branch to code in the free bank tail at `0x48714a80`. State uses 12 bytes of unused RAM at `0x9fc15bf4`. |
+| Whole-card library | `playlist.ap`, `music.ap`, `browser.ap`, `mainmenu.ap` | In `playlist.ap`, the scan limits at `0x4009523e` and `0x400952c8` and the preallocation literal at `0x40195260` are raised, the scan's counting pass is ended at `0x4009522a`, the library create at `0x40194d0e` keeps an existing library whatever its size instead of creating a second one, a loader replaces the index-pass driver at `0x400d5290`, and the new passes are stored as data in bank `0x400d4c00`, the unused bank `0x71252500`, and the tails of banks `0x48094400` and `0x48594400`, to be copied to `0xbfc3c000` and run from there. In the three reader apps, the five `sltiu` and `cmpi` 4,000 immediates in the song-lookup banks `0x712d2500` and `0x71352500` are raised. `docs/library-builder.md` has the details. |
 | Screen-off buttons | `browser.ap`, `music.ap`, `mainmenu.ap`, `playlist.ap`, `setting.ap` | Common key filter bank `0x48694600`. The first instruction of the filter's screen-off wake path, `0x486947d0`, branches to 22 bytes in the free bank tail at `0x48694b80`. That code sends keys `01`, `02`, `03`, `05`, and `06` to the filter's screen-on path and every other key back to the stock wake path. |
 
 ### Keys

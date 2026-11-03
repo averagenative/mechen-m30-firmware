@@ -23,6 +23,10 @@ Related notes: `README.md` (firmware format, banks, patch sites) and the hand-of
   about 15 bytes of RAM per song plus the sort keys. Whole-card indexing needs a rewrite of the
   four index passes that keeps the per-song tables in the file instead of RAM. The scan, the tag
   reader, the record writer, the node writer, and the header writer can stay as they are.
+- Done (2026-11-03): the patched `playlist.ap` builds a 15,991-song library on the player from
+  a 256 GB card, and every table in it is consistent and matches the PC model except for the
+  placement of names with characters above U+00FF. Getting there took four rounds against the
+  kernel's file I/O, described under "What the player runs showed".
 - Sort quality is not a concern. The stock code already refines ties by re-reading longer keys
   from the file, so short keys only cost time.
 - `.m4a` files are scanned and tagged. The stock sample library built from this card holds 210
@@ -324,37 +328,239 @@ and the node index are random-access outputs that can be built in 8 KB chunks by
 the previous pass's inverse and node index, which the next pass needs as secondary keys, are
 sequential reads from the file.
 
-## Recommended approach
+## The new index passes
 
-Keep the stock scan, tag reader, record writer, node writer, and header writer. Replace the four
-index passes with a file-backed sort:
+`tools/library/index.c` replaces the four stock passes. The scan, the tag reader, the record
+writer, the header writer, and the text conversion stay stock. The design is shaped by one
+number measured on the player: a kernel file call costs about 10 ms, whatever its size (the
+stock update takes about 8 minutes for 4,000 songs, or 0.1 s per file for roughly ten calls
+each). So the passes are arranged to make as few calls as possible:
 
-1. Raise the two scan loop bounds and the preallocation size to a new maximum such as 24,000.
-   The scan's own buffers scale: the key area holds `0x10000 / N` bytes per song, the track array
-   at `0x9fc29000` reaches `0x9fc2edc0` at 24,000, and the staging buffer is unchanged.
-2. For each pass, extract fixed-size key records to a scratch area at the end of `MUSIC.LIB`:
-   the converted field, the previous pass's rank and node index, the track number, and the song
-   index. Sort them with an external merge sort: in-RAM runs sorted with the stock quicksort, then
-   k-way merges with 2 KB buffers. Composite keys replace the stock sub-sorts and tie refinement.
-3. Walk the sorted stream once to fill A and the run-length tables, call the stock node writer,
-   then build the inverse and node-index tables in chunks and append them.
+- The scratch data lives in a second file, `MUSIC.TMP` in the card root, opened with its own
+  handle. A leftover from an interrupted update is deleted first (by its long name, which
+  works on the exFAT card, and by its 8.3 name), because the kernel cannot grow a file past
+  the size it was created with and a leftover may be too small. Then it is created with the
+  same calls the stock uses for `MUSIC.LIB` (change to the root, create with a size, op
+  `0x13` with 2, close, open), and at the end it is closed and deleted. A create on an
+  existing name adds a second directory entry on exFAT, which is why the delete comes first.
+  `MUSIC.LIB` is then only read sequentially and appended to, and the two handles never seek
+  past each other. If the file can't be created, the scratch area goes at the end of
+  `MUSIC.LIB` instead, with the same code.
+- Every stream has a buffer of 8 or 16 KB, and a seek is issued only when a handle's
+  position isn't already right, so sequential streams cost one call per buffer.
+- Every file call starts on a sector boundary, moves whole sectors, and stays inside one
+  4 KB block (`fs_io` splits a transfer at block boundaries). The kernel gets both other cases
+  wrong, as the diagnostic runs below showed, and 4 KB is the smallest cluster size the code
+  expects on a card. Sort runs are padded to sector boundaries, readers fetch aligned windows
+  and skip into them, and writers pad their last sector.
+- The merge is one pass of up to 32 runs with 2 KB buffers each (a run is 48 KB of records
+  sorted in RAM, so 32 runs cover 21,000 titles; above that a second pass runs).
+- The record table is read once: the title pass also writes the converted album, artist, and
+  genre names (with the track byte) to three key files, which the later passes read back
+  instead of the 256-byte records.
+- One walk of the sorted stream writes both the sort order and the run lengths of every level
+  (by name, then by album group, then by artist group). The level nodes are then written from
+  the order table and the run lengths, with a reimplementation of the stock node writer
+  (`write_nodes`), and the per-song tables (inverse rank, node index of the deepest level, and
+  for the Artist pass the level-0 artist group) are built in 8 KB chunks of 4,096 songs by
+  walking the order table once per chunk, with the inverse rank and the groups also kept in
+  the scratch file for the next pass.
 
-RAM at 18,000 songs is about 36 KB for A, 16 KB for run lengths, and 20 KB of I/O buffers.
-Scratch in the file is about 2.6 MB per pass. The design works up to about 32,000 songs with A in
-RAM, and higher if A is streamed too.
+The key record is the converted name (64, 48, 24, or 24 bytes, through the stock converter
+`FUN_480145dc`), the track number byte, the song's rank in the previous section's order, the
+album and artist group of the song, and the song index. The compare is the stock one (ASCII
+upper-cased, stopping at a shared terminator), then the track number as a signed byte inside an
+album (as the stock mode 1 compare), then the previous rank, then the song index. Since the
+compare is total, the stock's separate sub-sorts and tie refinement aren't needed.
 
-The new code is 4 KB to 8 KB of MIPS16. `playlist.ap` has about 49 KB of zero tail across its
-banks: the whole bank at `0x71252500` (file `0x10400`) is empty, and `0x40254c00`, `0x401d4c00`,
-`0x48094400`, `0x48594400`, `0x48014400`, `0x48c94600`, `0x40014c00`, and `0x71292500` each have
-more than 1.2 KB free. Bank `0x400d4c00` becomes free once the stock passes are replaced.
-`tools/repack_fw.py` cannot grow a file inside the firmware image, so the code must fit in these
-gaps. Because banks are 2 KB windows and calls between banks of one group reload the window, the
-plan is to store the new code as data in the free bank space, copy it to RAM at the top of the
-builder's region with a small loader in bank `0x400d4c00`, and run it from the uncached alias,
-which is how the apps themselves run.
+RAM use is fixed: a 96 KB arena at `0x9fc22000` laid out per phase (records and writers, the
+48 KB run buffer and its index arrays, the 32 merge readers, the chunk arrays), the merge
+slots and reader state at `0x9fc3a000`, and the globals at `0x9fc3ae00`. The code is 5.2 KB
+of MIPS16 and runs at `0xbfc3c000`. Nothing scales with `N` except the files: the scratch
+file holds two `76 N` record areas, the three key files (`102 N`), three run-length streams,
+the order, and three per-song tables, about `270 N` in all (4.8 MB at 18,000 songs), and the
+`MUSIC.LIB` preallocation is 64 KB plus 660 bytes per song at the limit, enough for the
+scratch area in the fallback case.
 
-Everything else stays stock: the M3U.LIB scanner and its 4,000-entry limit, the tag reader, and
-the folder views.
+In the harness at 18,000 synthetic songs the passes make 3,006 seeks, 3,724 reads (19 MB) and
+1,768 writes (14 MB): about 8,500 kernel calls, against 137,000 for the first version, which
+kept everything in `MUSIC.LIB` with 2 KB buffers and 512-byte calls.
+
+Two differences from stock are deliberate. Songs whose names compare equal keep their scan
+order (the stock quicksort scrambles them), and a name stored as ASCII in one record and as
+UTF-16 in another is one group. The stock makes two groups out of such a pair: after the
+terminator its key buffer holds leftover UTF-16 bytes for one record and zeros for the other,
+and the tie refinement sees the difference. The player-built sample has seven such duplicate
+albums, four artists, and two genres.
+
+### Loader and patch layout
+
+`tools/library/loader.c` takes the place of `FUN_400d5290` at `0x400d5290`. It reads the
+builder's RAM once through the cached alias, so dirty cache lines left by the scan are written
+back before the code lands there, then copies the passes from four pieces of free bank space to
+`0xbfc3c000` through the uncached alias and calls them. Calling into a bank makes the kernel
+load it, so the pieces outside the loader's own bank start with a `jr ra; nop` stub that the
+loader calls first. The loader's entry must be the first function in its file: the stock
+caller jumps to the first byte, and the blobs are compiled with `-fno-toplevel-reorder`, so
+functions keep their source order. The first two builds had the static helper `chunk` defined
+before `load_and_run`, so the scan driver called `chunk` with its own arguments and the player
+hung at 20% in every run; `build.sh` now checks the entry address of both blobs, and the
+patch script reads the pieces back. The blob is whatever the linker puts in `.text`, so
+`build.sh` links `.rodata` (string literals, the hex table) into it right after the code: the
+first diagnostic run had every string missing, its result read "819281920" with no labels,
+and the scratch file name was garbage. `tools/library/patch_library.py` writes the pieces:
+
+| Piece | Where | Bytes |
+|---|---|---|
+| 0 | bank `0x400d4c00`, offset 0 to `0x690` (the dead stock passes) | 1,680 |
+| 1 | bank `0x71252500` (file `0x10400`), unused in stock | 2,044 after the stub |
+| 2 | bank `0x400d4c00`, offset `0x770` to `0x800`, after the loader | 144 |
+| 3 | the zero tail of bank `0x48094400` (clears the update flag when the build is done) from offset `0x2a0` | 1,372 after the stub |
+| 4 | the zero tail of bank `0x48594400` (user playlist file helpers) from offset `0x2c0` | 1,340 after the stub |
+
+A chunk must not share the loader's bank window. Every `0x40xx4c00` bank is loaded into the
+one 2 KB window that holds the loader's own bank `0x400d4c00`, so calling the stub of a chunk
+stored in another bank of that group replaces the loader's code while it runs. One build kept
+piece 3 in the tail of bank `0x40254c00` and hung at 20% in every run, with the records
+scanned and no `MUSIC.TMP` created. The `0x48` group (window `0x4400` to `0x4c00`) and the
+`0x71` group (window `0x2500`) are separate windows, which is also why the stock code can
+call between the groups freely. `patch_library.py` checks the group of every chunk.
+
+A zero tail is not always free. The first whole-card builds kept piece 3 in the zero tail of
+bank `0x71292500`, and every short M4A name in those libraries came out with junk appended
+("Dirt" became "DirtQQ\x02JJ5#..."; 391 of 515 M4A records in one run, none in the stock
+library). That bank holds the M4A reader's UTF-8 string helper (`FUN_71292644`: read up to 128
+bytes of the atom, convert them with `FUN_71292500`, copy the result into the record field),
+and its two scratch buffers are the tail itself, at `0x7129272c` and `0x712927ac`. The
+converter runs until it meets a zero byte, so whatever is stored after the string is read as
+part of the name, and the junk was the passes' own code. A literal-pool scan of the file
+(every 32-bit word that looks like a bank address) finds those two pointers and none into the
+tails of `0x48094400` and `0x48594400`, whose code keeps its state on the stack and in the
+app's data segment; `patch_library.py` asserts both tails are zero in the stock file. Neither
+bank runs during the scan, so the window cannot hold a modified copy when the loader reads it.
+
+The same patch raises the two scan limits at `0x4009523e` and `0x400952c8` and the
+preallocation literal at `0x40195260`, and makes two more changes to the stock code:
+
+- `FUN_40194c78` (the library create) opens an existing `MUSIC.LIB`, and if it is smaller
+  than the preallocation closes it and calls create on the name. The stock never hits that
+  path (its file is always the preallocated size), but the first boot after flashing does, and
+  on the exFAT card the create on an existing name adds a second `MUSIC.LIB` directory entry
+  (the first run left two, which `fsck.exfat` repaired by renaming one; the scan had written
+  its records into the old file, extending it). Deleting the old file first on that path was
+  tried and changed nothing (a second run left a second pair), although the same delete call
+  does remove `MUSIC.TMP` at the end of the passes; the difference is not understood (the
+  library may still have been open). So the `bteqz` at `0x40194d0e` that skips
+  the close when the file is big enough is now an unconditional `b`: an existing library is
+  kept whatever its size, and the scan's writes extend it. The delete calls still run on the
+  file-missing path, as in stock.
+- The scan's counting pass (the first loop of `FUN_40095220`) only sized the stock's 64 KB key
+  buffer, which the new passes never read. Its first walker call at `0x4009522a` is now
+  `li v0,0`, so it ends at once, and the scan walks the card once instead of twice. The key
+  width becomes 0, so the stock key extraction copies and converts nothing.
+
+`--reader` rewrites the five `sltiu` and `cmpi` immediates in each of `music.ap`,
+`browser.ap`, and `mainmenu.ap`. `build.sh` sets the limit with `LIB_MAX`, 24,000 by default:
+above 28,672 the scan's track-number array would reach its key area, and 24,000 songs
+preallocate a 15.9 MB `MUSIC.LIB`. The M3U.LIB scanner and its 4,000-entry limit are
+untouched.
+
+## What the player runs showed
+
+- The upgrade installs and the builder runs. The filelist update's progress bar is a step
+  counter (`FUN_401d4cb0`, ten notches of 12 px), not a work fraction: 10% after the
+  builder's init, 20% when the scan is done, one notch per section of the index passes, one
+  after the finalize, then the M3U.LIB build. Only `MUSIC.LIB` and `M3U.LIB` are built by
+  `playlist.ap`.
+- The scan of 16,000 files takes 10 to 15 minutes and the passes under 10. The first two
+  builds stayed at 20% for hours because of the loader entry bug described above; no version
+  of the passes had run on the player yet. A later build hung at 20% because piece 3 shared
+  the loader's bank window (also above). The `MUSIC.LIB` recreate bug was found from the
+  file the first scan left behind.
+- The card is exFAT with 32 KB clusters (2,012 directories, 19,938 files), handled by
+  `exfatn.drv`, not `fat_32n.drv`. The 8.3 names the stock passes to the delete call are a
+  FAT32 fallback. `tools/library/exfat_extents.py` prints how the root files are allocated
+  from the raw device: a file created on fragmented free space (`MUSIC.LIB` after the first
+  rebuild) has a FAT chain, a contiguous one has the `NoFatChain` flag and no chain.
+- The update-needed decision is a flag word in the player's settings flash. `config.ap` reads
+  4 bytes at `0x2f0000` through kernel module `0x0f` op `0x12` at boot and launches
+  `playlist.ap` (app 10, parameter `0x4e`) when bit 16 is set; it sets the bit itself when the
+  settings block at `0x20000` is invalid, which is why the first boot after an upgrade builds
+  the library. `playlist.ap` clears the bit only at the very end of a successful update
+  (`FUN_48094658` -> `FUN_48094400`). A build that is interrupted therefore restarts on every
+  boot until one completes. After a USB disconnect, `udisk.ap` starts the builder directly.
+- The player keeps its own view of the card's directories and writes it back: scratch files
+  deleted from the PC came back after a player run, and a data file copied to the card was
+  not found by one diagnostic run. Unmount cleanly before unplugging, and put data a
+  diagnostic build must read inside a file whose directory entry does not change
+  (`replay.c` falls back to a copy at 12 MB of `MUSIC.LIB`, written with `dd conv=notrunc`).
+- `build.sh --library-bench` makes a diagnostic firmware from `tools/library/bench.c`: it scans
+  100 files, then times seven primitive tests (sequential and random 512-byte reads and
+  writes, 8 KB reads and writes checked against 512-byte ones, and a second file with its own
+  handle), writes the results into song record 0 and the directory walker's entry bytes into
+  records 1 and 2, and leaves the library empty. Its run with the string literals missing
+  left a hidden 4 MiB file with an empty name in the folder where the scan stopped (create
+  with a BOM-only name, attribute 2 from op `0x13`); `fsck.exfat` reports such entries as
+  invalid and removing them is safe. Current builds name the file and change to the root
+  first.
+
+### The kernel's file I/O bugs
+
+The first whole-card builds (16,096 songs) listed every song in All songs but failed the
+comparison with `libmodel.py`: the All songs order was right for its first 768 or 1,365
+entries and junk after, the inverse and node tables were junk, and runs of written and
+never-written sectors alternated with transitions exactly at 32 KB cluster boundaries. One
+library held, in its Album node table, the benchmark's 8 KB fill pattern, which led to a
+theory that the kernel's file writes take their data from physical RAM behind the data cache.
+That was wrong: the pattern was stale disk data (the benchmark's test 7 had written it into
+`MUSIC.LIB` at 1 to 9 MB a reboot earlier, and the passes had never written that sector). The
+arena is still used through the uncached alias, which costs nothing measurable. The real
+causes came out of three diagnostic firmwares, each a different source in the passes' slot:
+
+- `--library-probe` scans 100 songs, runs the real passes and leaves `MUSIC.TMP` and the
+  passes' globals on the card. The library and the scratch file were byte-identical to the
+  QEMU harness, but with 100 songs every scratch access stays inside the first cluster.
+- `--library-iotest` (`tools/library/iotest.c`) stamps every 512-byte sector it writes with
+  the file, the offset and a pass number, and checks every sector it reads, with 8 KB
+  sector-aligned calls. Its first run reused a leftover 95 KB `MUSIC.TMP` and failed every
+  scratch-file test from the first 32 KB cluster boundary on: the kernel does not extend a
+  file past the size it was created with, whatever the write returns. On freshly created
+  files of the right size, sequential, random, and out-of-order first writes and reads all
+  pass; a file created with size 0 cannot be written at all (T6); and a create on an existing
+  name once left two directory entries named `MUSIC.TMP`.
+- `--library-replay` (`tools/library/replay.c`, `replay.py`) replays the passes' exact
+  sequence of seeks, reads and writes, recorded from a `-DTRACE_OPS` harness run, with
+  self-describing data (the word at aligned offset `w` of file `f` is `w ^ KEY[f]`), and
+  checks every read whose bytes were all written before. The stream of the sub-sector
+  version showed two kernel bugs: a read or write that starts or ends inside a 512-byte
+  sector transfers the wrong bytes and leaves the handle's position wrong, and a single call
+  that crosses a cluster boundary in a file with a FAT chain stops advancing along the chain
+  (the stock code never does either: it moves whole sectors in sector-sized pieces). The
+  current passes' stream, 12,676 operations with every call sector-aligned and inside one
+  4 KB block, replayed with no errors, and `replay.py synth` makes synthetic streams that
+  cross cluster boundaries to confirm the rule.
+
+### Results
+
+The first build of the aligned passes (2026-11-02) produced a 15,991-song library in which
+every section's order, inverse, node levels and node index table are consistent with each
+other (`selfcheck` in the session notes walks the whole structure) and the Genre section was
+identical to the model. The only differences from the model were the placement of names with
+characters above U+00FF, which depend on the kernel's text converter: "Phœnix" sorts after
+"Phototropic", "D’Angelo" before "DāM‐FunK" before "D12", "JAŸ-Z" after "Jaylib", and
+"Tomorrow’s Harvest" after "Tomorrow's Harvest". The model's rule (stop at the first such
+character, keep the UTF-16 bytes after it) fits most of them but not all, and the stock
+library disagrees with the model even on ASCII ties because of its quicksort, so this
+placement is treated as unverifiable rather than wrong. That build also appended junk to
+391 of its 515 M4A names, which was piece 3 of the passes stored in the M4A reader's scratch
+buffers (see the loader section). The build with the pieces in the `0x48` bank tails
+(2026-11-03) is clean: 15,991 songs, 803 artists, 1,711 albums, no junk names, the same
+tables as before. The player browses all of it.
+
+The kernel itself is in the firmware image (`kernel.drv`, `ker_*.bin`, `exfatn.drv`,
+`fat_32n.drv` and the `drv_*.drv` modules in `build/work/stock/fw/`). Running it under QEMU
+with a card image would make the text converter and the file-system behavior observable
+without a flash cycle per experiment; nobody has tried yet.
 
 ## Test plan
 
@@ -363,7 +569,8 @@ the folder views.
    their real addresses, with every RAM and resident pointer in their literal pools moved by
    `tools/library/testbanks.py` to harness memory (the scan of 4-byte aligned words for pointer
    values matches the decompile's literal-pool list exactly for all six banks), and implements
-   the file system ops, the text conversions, the append write, and the message pump in C. The
+   the file system ops (two files, `MUSIC.LIB` and `MUSIC.TMP`, each with its own position),
+   the text conversions, the append write, and the message pump in C, counting the calls. The
    harness sets up the app state as the scan leaves it, generates the title keys with the stock
    key routine, calls `FUN_400d5290` and the header finalize `FUN_4019502c`, and compares the
    result with the player-built file. `tools/library/test.sh STOCK_PLAYLIST.AP MUSIC.LIB` builds
@@ -380,19 +587,46 @@ the folder views.
    quirk that is harmless on the player, ignored in the harness), and the file position is
    shared between reads and appends, which the stock code handles by seeking back to the
    append sector after each extraction.
-2. The same harness runs the new passes on the same records and diffs the output against stock,
-   on ASCII-only names where the stock order is reproduced exactly.
-3. A synthetic 18,000-song input built from the card index checks the new passes at scale
-   against a Python reference model, and `tools/musiclib.py` decodes the result.
-4. On the player: raise the cap, flash, and check All songs, Artists, Albums, Genres, favourites
-   from the now-playing screen, and the filelist update time. The update already takes minutes
-   for 4,000 files, and tag reading dominates, so expect a longer wait after each unplug.
+2. Done: `tools/library/libmodel.py` is a Python model of the new passes that computes the
+   expected tables and nodes from a library's records, and `test.sh ... new` links the TEST
+   build of `index.c` into the harness and compares its output with the model's
+   (`INDEX_SRC=... test.sh` runs another source, such as `bench.c`). On the player-built
+   sample, on a 4,000-song synthetic library from `tools/library/mklib.py`, and on an
+   18,000-song one, every table and node is identical to the model, for the first version and
+   for the two-file version. Against the stock passes, `tools/library/libgroups.py` shows the
+   only grouping differences are the ASCII-versus-UTF-16 duplicates described above.
+3. `build.sh --test` runs the harness on a 6,000-song synthetic library and requires the
+   byte-for-byte match.
+4. Done: on the player, the benchmark, probe, I/O test and replay firmwares in turn, then the
+   real one. A device-built library is checked with `libmodel.py MUSIC.LIB expected.lib` and
+   `libdiff.py expected.lib MUSIC.LIB` (every table identical except the non-ASCII names
+   above), and `sudo fsck.exfat -n /dev/sda` shows whether a run left junk entries.
+
+## Next: skip the rebuild when the card hasn't changed
+
+The scan is about 0.1 s per file whatever the passes do, so a full rebuild of an 18,000-song
+card is around half an hour, and the player starts one after every USB disconnect, even after
+charging. The plan is a fingerprint of the directory walk (names, sizes, and times of every
+entry) stored in the `MUSIC.LIB` header, computed with a walk only (no file opens) at the
+start of the builder, and compared before `FUN_40194c78` recreates the file: if it matches and
+the existing library is complete, the music and M3U builds are skipped and the update ends
+normally (the flag still gets cleared). What the walker's entry pointer gives access to is
+what the diagnostic firmware dumps into records 1 and 2.
 
 ## Risks
 
-- The filelist update runs before the menu after every unplug and blocks USB. A builder that
-  crashes could stop the player from reaching Setting > Auto upgrade, the only known flashing
-  path. A marker file on the card as a kill switch, or falling back to the stock 4,000 behavior
-  when the new code fails a self-check, is worth building in.
-- The exact bit order of the extension mask, the two unexplained 4,000 literals in `music.ap`,
-  and whether the list screens have a hidden limit are open until the first on-device test.
+- The filelist update runs before the menu after every unplug and blocks USB, and an
+  interrupted update restarts on every boot. A builder that crashes could stop the player
+  from reaching Setting > Auto upgrade, the only known flashing path. In practice a hard
+  power-off a few minutes into the update let the menu through once; a marker file on the
+  card as a kill switch, or falling back to the stock behavior when the new code fails a
+  self-check, is still worth building in.
+- The loader can't be tested in QEMU user mode: it depends on the kernel loading a bank when
+  a stub in it is called and on reading bank windows as data. Both work on the player, for
+  banks in the `0x48` and `0x71` groups. `--no-library` builds a firmware without the patch.
+- Every file call is kept inside a 4 KB block, so a card formatted with clusters smaller than
+  4 KB would hit the cluster-crossing bug. The player formats cards with 32 KB clusters.
+- Names with characters above U+00FF may land in a different place than the PC model
+  predicts, and the list screens have been checked by browsing, not exhaustively. The other
+  4,000 literals in `music.ap` are an audio sample-rate table and a millisecond timeout, not
+  library limits.

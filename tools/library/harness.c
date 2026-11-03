@@ -20,9 +20,14 @@ __attribute__((section(".testram"), used)) volatile u8 testram[0x40000];
 
 extern u8 expect_image[];                      /* the library the player built */
 extern u32 expect_len;
-__attribute__((section(".disk"), used)) u8 disk[0x300000];   /* the file the passes write */
+__attribute__((section(".disk"), used)) u8 disk[0x1000000];  /* the file the passes write, 16 MB */
 
-static u32 disk_pos;
+__attribute__((section(".disk"), used)) u8 tmpf[0x800000];  /* a second file, MUSIC.TMP, handle 2 */
+extern u8 ops_image[];                         /* IOTEST.OPS for replay.c, handle 3 (test.sh OPS=) */
+extern u32 ops_len;
+static u32 fpos[4];                           /* position of handle 1 (the library), 2 and 3 */
+static u32 n_seek, n_read, n_write, b_read, b_write, n_app, s_app;   /* operation counts, for the timing estimate */
+static u32 n_unal, n_cross;                   /* calls the player's kernel gets wrong: inside a sector, across a 4 KB block */
 
 /* ---- output ---- */
 static long sys3(long n, long a, long b, long c)
@@ -31,7 +36,11 @@ static long sys3(long n, long a, long b, long c)
     asm volatile("syscall" : "+r"(v0), "=r"(a3) : "r"(a0), "r"(a1), "r"(a2) : "memory", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "hi", "lo");
     return v0;
 }
+#ifdef TRACE_OPS
+static char obuf[1 << 20]; static int olen;
+#else
 static char obuf[1 << 16]; static int olen;
+#endif
 static void puts_(const char *s) { while (*s) obuf[olen++] = *s++; }
 static void putu(u32 v) { char t[12]; int i = 0; do t[i++] = '0' + v % 10; while (v /= 10); while (i) obuf[olen++] = t[--i]; }
 static void puthex(u32 v) { const char *h = "0123456789abcdef"; int i; puts_("0x"); for (i = 28; i >= 0; i -= 4) obuf[olen++] = h[(v >> i) & 15]; }
@@ -57,25 +66,66 @@ u32 stub_libc(u32 a, u32 b, u32 c, u32 fn)
     return 0;
 }
 
-/* module 0x11: the file system, with one open file (the library) and one position */
+/* module 0x11: the file system: handle 1 is the library, handle 2 MUSIC.TMP, each with a position.
+ * QUIRK emulates a kernel that mishandles unaligned I/O, to match a bad library from the player:
+ * 1 seeks round down to the sector, 2 the position after a read or write rounds up to the sector,
+ * 3 reads and writes transfer whole sectors (rounding the count up), 4 a transfer stops at a
+ * CLUSTER boundary but the position still advances by the full count, 5 the same with the
+ * position advancing by what was transferred, 6 reads of MUSIC.TMP beyond its highest written
+ * byte return zeros, 7 seeks in MUSIC.TMP beyond its highest written byte clamp to it. */
+#ifndef QUIRK
+#define QUIRK 0
+#endif
+#ifndef CLUSTER
+#define CLUSTER 0x10000u
+#endif
+static u32 tmp_hw;                            /* highest written byte of MUSIC.TMP, for quirks 6 and 7 */
 __attribute__((section(".stub_fs"), used, noinline))
 u32 stub_fs(u32 h, u32 a, u32 b, u32 ctx, u32 id)
 {
-    u32 i;
-    (void)h; (void)ctx;
+    u32 i, hd = (id == 0xb || id == 0xd || id == 0xe) ? ctx : 0;   /* a, b, handle, op */
+    u8 *f = hd == 2 ? tmpf : hd == 3 ? ops_image : disk;
+    u32 fsz = hd == 2 ? sizeof tmpf : hd == 3 ? ops_len : sizeof disk;
+    (void)h;
+#ifdef TRACE_OPS                               /* -DTRACE_OPS: print every call, for comparing with a probe build */
+    puts_("fs op "); putu(id); if (hd) { puts_(" h"); putu(hd); puts_(" at "); putu(fpos[hd]); puts_(" a="); puthex(a); puts_(" b="); putu(b); } puts_("\n");
+#endif
     switch (id) {
     case 0: return 1;                          /* change directory */
-    case 5: disk_pos = 0; return 1;            /* open by name: the library */
+    case 5: {                                  /* open by name (BOM + UTF-16): MUSIC.LIB, MUSIC.TMP or IOTEST.OPS */
+        u32 hh = ((const u8 *)a)[2] == 'I' ? 3 : ((const u8 *)a)[2 + 2 * 6] == 'T' ? 2 : 1;
+        fpos[hh] = 0; return hh; }
+    case 6: fpos[2] = 0; return 2;             /* create by name with a size */
     case 7: return 1;                          /* close */
-    case 0xb: disk_pos = a; return 1;          /* seek to a byte offset */
-    case 0xd:                                  /* read b bytes to a */
-        for (i = 0; i < b; i++) ((u8 *)a)[i] = disk_pos + i < sizeof disk ? disk[disk_pos + i] : 0;
-        disk_pos += b;
-        return b;
-    case 0xe:                                  /* write b bytes from a */
-        for (i = 0; i < b; i++) if (disk_pos + i < sizeof disk) disk[disk_pos + i] = ((u8 *)a)[i];
-        disk_pos += b;
-        return b;
+    case 8: return 1;                          /* delete by 8.3 name */
+    case 0x13: return 1;                       /* after create, as stock */
+    case 0xb:                                  /* seek to a byte offset */
+        fpos[hd] = QUIRK == 1 ? a & ~(SECTOR - 1) : a; n_seek++;
+        if (QUIRK == 7 && hd == 2 && fpos[hd] > tmp_hw) fpos[hd] = tmp_hw;
+        return 1;
+    case 0xd: {                                /* read b bytes to a */
+        u32 t = b;
+        n_read++; b_read += b;
+        if (fpos[hd] % SECTOR || b % SECTOR) n_unal++;
+        if (fpos[hd] / 4096 != (fpos[hd] + b - 1) / 4096) n_cross++;
+        if (QUIRK == 3) b = t = (b + SECTOR - 1) & ~(SECTOR - 1);
+        if ((QUIRK == 4 || QUIRK == 5) && fpos[hd] / CLUSTER != (fpos[hd] + b - 1) / CLUSTER) t = CLUSTER - fpos[hd] % CLUSTER;
+        for (i = 0; i < t; i++) ((u8 *)a)[i] = fpos[hd] + i < fsz && !(QUIRK == 6 && hd == 2 && fpos[hd] + i >= tmp_hw) ? f[fpos[hd] + i] : 0;
+        fpos[hd] += QUIRK == 5 ? t : b;
+        if (QUIRK == 2) fpos[hd] = (fpos[hd] + SECTOR - 1) & ~(SECTOR - 1);
+        return b; }
+    case 0xe: {                                /* write b bytes from a */
+        u32 t = b;
+        n_write++; b_write += b;
+        if (fpos[hd] % SECTOR || b % SECTOR) n_unal++;
+        if (fpos[hd] / 4096 != (fpos[hd] + b - 1) / 4096) n_cross++;
+        if (QUIRK == 3) b = t = (b + SECTOR - 1) & ~(SECTOR - 1);
+        if ((QUIRK == 4 || QUIRK == 5) && fpos[hd] / CLUSTER != (fpos[hd] + b - 1) / CLUSTER) t = CLUSTER - fpos[hd] % CLUSTER;
+        for (i = 0; i < t; i++) if (fpos[hd] + i < fsz) f[fpos[hd] + i] = ((u8 *)a)[i];
+        if (hd == 2 && fpos[hd] + t > tmp_hw) tmp_hw = fpos[hd] + t;
+        fpos[hd] += QUIRK == 5 ? t : b;
+        if (QUIRK == 2) fpos[hd] = (fpos[hd] + SECTOR - 1) & ~(SECTOR - 1);
+        return b; }
     }
     puts_("fs op "); putu(id); puts_(" unknown\n"); flush(); sys3(4001, 2, 0, 0);
     return 0;
@@ -86,8 +136,9 @@ __attribute__((section(".stub_append"), used, noinline))
 u32 stub_append(u32 buf, u32 len)
 {
     u32 n = (len - 1) / SECTOR + 1, i;
-    for (i = 0; i < n * SECTOR; i++) if (disk_pos + i < sizeof disk) disk[disk_pos + i] = ((u8 *)buf)[i];
-    disk_pos += n * SECTOR;
+    n_app++; s_app += n;
+    for (i = 0; i < n * SECTOR; i++) if (fpos[1] + i < sizeof disk) disk[fpos[1] + i] = ((u8 *)buf)[i];
+    fpos[1] += n * SECTOR;
     R16(0x1540a) += n;
     return 1;
 }
@@ -140,6 +191,14 @@ static void (*const p_passes)(void) = (void (*)(void))0x400d5291;             /*
 static u32 (*const p_header)(u32) = (u32 (*)(u32))0x4019502d;                  /* FUN_4019502c */
 static void (*const p_key)(u32, u32, u32, u32) = (void (*)(u32, u32, u32, u32))0x48014695;  /* FUN_48014694 */
 
+static void (*const p_new)(void) = (void (*)(void))0x10040001;                 /* index.c, TEST build, linked above the RAM */
+static u32 use_new_flag(void)                                                 /* --defsym use_new=0|1 */
+{
+    u32 v;
+    asm("la %0, use_new" : "=r"(v));           /* an array's address would be folded to "true" */
+    return v;
+}
+
 static u32 rd16(const u8 *p) { return p[0] | (p[1] << 8); }
 
 void _start(void)
@@ -155,7 +214,7 @@ void _start(void)
 
     /* the disk: header and records as the player wrote them, index area blank */
     for (i = 0; i < sizeof disk; i++) disk[i] = i < first_free * SECTOR && i < expect_len ? expect_image[i] : 0;
-    disk_pos = first_free * SECTOR;
+    fpos[1] = first_free * SECTOR;
 
     for (i = 0; i < sizeof testram; i++) testram[i] = 0;
 
@@ -172,15 +231,19 @@ void _start(void)
     R16(0x15440) = n;                         /* scan count */
     R8(0x158cc) = keylen;
     R8(0x158cf) = 0;
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n && !use_new_flag(); i++) {                         /* the stock passes need the scan's keys */
         const u8 *rec = expect_image + 0x200 + i * 256;
         p_key(RAMB + 0x30000 + i * keylen, (u32)rec, 0, keylen);      /* title key, as the scan does */
         R8(0x29000 + i) = rec[0xf2];                                   /* track number byte */
     }
 
-    p_passes();
+    puts_(use_new_flag() ? "running the new index passes\n" : "running the stock index passes\n");
+    if (use_new_flag()) p_new(); else p_passes();
     p_header(0);
 
+    puts_("file ops: seeks "); putu(n_seek); puts_(", reads "); putu(n_read); puts_(" ("); putu(b_read); puts_(" bytes), writes "); putu(n_write);
+    puts_(" ("); putu(b_write); puts_(" bytes), appends "); putu(n_app); puts_(" ("); putu(s_app); puts_(" sectors)\n");
+    puts_("calls inside a sector: "); putu(n_unal); puts_(", across a 4 KB block: "); putu(n_cross); puts_(n_unal || n_cross ? "  <-- the player's kernel gets these wrong\n" : "\n");
     puts_("sector counter after the passes: "); putu(R16(0x1540a)); puts_("\n");
     for (i = 0; i < expect_len && i < sizeof disk; i++) {
         if (disk[i] != expect_image[i]) { if (!mism) first_mism = i; mism++; }
@@ -200,6 +263,8 @@ void _start(void)
     {   /* save the file the passes wrote, for diffing */
         long fd = sys3(4005, (long)"harness_out.lib", 0x301, 0644);   /* O_WRONLY|O_CREAT|O_TRUNC */
         if (fd >= 0) { sys3(4004, fd, (long)disk, R16(0x1540a) * SECTOR); sys3(4006, fd, 0, 0); }
+        fd = sys3(4005, (long)"harness_tmp.bin", 0x301, 0644);          /* and MUSIC.TMP, for diagnosing a player file */
+        if (fd >= 0) { sys3(4004, fd, (long)tmpf, sizeof tmpf); sys3(4006, fd, 0, 0); }
     }
     puts_(fails ? "FAIL\n" : "ALL PASS\n");
     flush();
